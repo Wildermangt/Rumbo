@@ -1,0 +1,100 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    name: Backend (lint · typecheck · test · build)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+
+  frontend:
+    name: Frontend (lint · typecheck · test · build)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+
+  docker:
+    name: Build images & scan (Trivy)
+    runs-on: ubuntu-latest
+    needs: [backend, frontend]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build backend image
+        run: docker build -t task-manager/backend:ci ./backend
+      - name: Build frontend image
+        run: docker build -t task-manager/frontend:ci ./frontend
+      - name: Scan backend image (Trivy)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: task-manager/backend:ci
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: '0' # informativo; súbelo a '1' para bloquear ante CVEs corregibles
+      - name: Scan frontend image (Trivy)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: task-manager/frontend:ci
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: '0'
+
+  compose-smoke:
+    name: Smoke test (docker compose)
+    runs-on: ubuntu-latest
+    needs: [backend, frontend]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Levantar el stack
+        run: docker compose up --build -d
+      - name: Esperar al backend
+        run: |
+          for i in $(seq 1 30); do
+            if curl -fsS http://localhost:3000/api/health; then echo "ok"; exit 0; fi
+            sleep 5
+          done
+          echo "backend no respondió"; docker compose logs --no-color; exit 1
+      - name: Login y listado de tareas
+        run: |
+          TOKEN=$(curl -fsS -X POST http://localhost:3000/api/auth/login \
+            -H 'Content-Type: application/json' \
+            -d '{"username":"admin","password":"admin123"}' | python3 -c "import sys,json;print(json.load(sys.stdin)['data']['token'])")
+          curl -fsS "http://localhost:3000/api/tasks?page=1&pageSize=5" -H "Authorization: Bearer $TOKEN" > /dev/null
+          curl -fsS "http://localhost:3000/api/tasks/stats?granularity=month" -H "Authorization: Bearer $TOKEN" > /dev/null
+      - name: Apagar
+        if: always()
+        run: docker compose down -v
