@@ -1,0 +1,6 @@
+-- backend
+-:28 DL3018 [1m[93mwarning[0m: Pin versions in apk add. Instead of `apk add <package>` use `apk add <package>=<version>`
+-:34 DL3066 [92minfo[0m: Non-numeric user-id may not be resolvable by host system
+-:37 DL3025 [1m[93mwarning[0m: Use arguments JSON notation for CMD and ENTRYPOINT arguments
+-- frontend
+-:22 DL3025 [1m[93mwarning[0m: Use arguments JSON notation for CMD and ENTRYPOINT arguments

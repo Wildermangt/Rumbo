@@ -1,0 +1,13 @@
+$ semgrep --config p/owasp-top-ten p/nodejs p/jwt p/secrets ...   (67 archivos)
+Findings: 1  (WARNING: nginx request-host-used en proxy_set_header Host)
+# Sin hallazgos de inyeccion, secretos hardcodeados ni JWT inseguro en el codigo propio.
+
+$ gitleaks dir /repo
+INF no leaks found   (5.14 MB escaneados)
+
+$ hadolint backend/Dockerfile  /  frontend/Dockerfile
+DL3018 pin de versiones en apk add   (warning)
+DL3025 usar notacion JSON en CMD/ENTRYPOINT (warning)
+
+$ trivy config .   (IaC / Dockerfile)
+DS-0002 (HIGH): el Dockerfile del frontend no declara USER (nginx corre como root)

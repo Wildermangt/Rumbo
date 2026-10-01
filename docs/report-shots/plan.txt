@@ -1,0 +1,7 @@
+$ sqlcmd: SET STATISTICS PROFILE ON; EXEC sp_GetTasks @Status='PENDING'...
+
+Operador principal:
+  Index Seek(OBJECT:([TasksDb].[dbo].[Tasks].[IX_Tasks_Status_CreatedAt]), SEEK:([TasksDb].[dbo].[Tasks].[Status ...
+
+Operadores Sort en el plan: 0
+# El indice entrega las filas ya ordenadas -> Index Seek ORDERED FORWARD, sin Sort.

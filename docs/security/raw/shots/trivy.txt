@@ -1,0 +1,8 @@
+$ trivy image <imagen>   # CVEs de paquetes del sistema operativo y runtime
+
+task-manager/backend             CRITICAL=3   HIGH=42  MEDIUM=48  LOW=38
+task-manager/frontend            CRITICAL=2   HIGH=42  MEDIUM=72  LOW=42
+mcr.microsoft.com/mssql/server:2022 CRITICAL=0   HIGH=62  MEDIUM=156 LOW=54
+
+# Origen: imagenes base (alpine 3.21 / ubuntu 22.04) desactualizadas.
+# Mitigacion: reconstruir con bases al dia (ej. node:22-alpine) y 'apk upgrade' en build.

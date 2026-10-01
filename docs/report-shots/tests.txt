@@ -1,0 +1,10 @@
+$ cd backend && npm test        (Vitest + Supertest)
+ ✓ tests/api.test.ts (20 tests) 433ms
+ Test Files  1 passed (1)
+      Tests  20 passed (20)
+
+$ cd frontend && npm test       (Vitest + Vue Test Utils)
+ ✓ src/components/TaskStatusChip.test.ts (2 tests) 37ms
+ ✓ src/composables/useTasks.test.ts (6 tests) 17ms
+ Test Files  2 passed (2)
+      Tests  8 passed (8)

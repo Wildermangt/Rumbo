@@ -1,0 +1,6 @@
+$ npm run lint   (backend y frontend)
+backend  -> 0 errores, 0 warnings
+frontend -> 0 errores, 0 warnings
+
+$ docker compose config (prod) | grep published
+frontend -> 8080   (backend y SQL Server no se publican: hallazgo H-4)

@@ -1,0 +1,28 @@
+$ python docs/security/dast.py   # 24 pruebas no destructivas vs http://localhost:8080
+
+[PASS ] DAST-01  Endpoint protegido sin token
+[PASS ] DAST-02  JWT con firma manipulada
+[PASS ] DAST-03  JWT alg:none (bypass de firma)
+[PASS ] DAST-04  JWT falsificado con el secreto por defecto
+[PASS ] DAST-05  Rate limiting en /auth/login
+[PASS ] DAST-06  Enumeración de usuarios en login
+[PASS ] DAST-07  Inyección SQL en query 'status'
+[PASS ] DAST-08  SQLi basada en tiempo en 'title'
+[PASS ] DAST-09  Payload XSS almacenado (defensa en el front)
+[PASS ] DAST-10  Mass assignment / campos extra
+[PASS ] DAST-11  Límite de longitud en 'title'
+[PASS ] DAST-12  Límite de tamaño del body (DoS)
+[PASS ] DAST-13  Cabeceras de seguridad en la API
+[PASS ] DAST-14  Cabeceras de seguridad en el frontend (nginx)
+[PASS ] DAST-15  Fingerprinting X-Powered-By
+[PASS ] DAST-16  Política CORS
+[PASS ] DAST-17  Fuga de stack trace
+[PASS ] DAST-18  Formato uniforme en 404
+[PASS ] DAST-19  Método HTTP no soportado
+[PASS ] DAST-20  Validación de :id (no numérico)
+[WARN ] DAST-21  Backend expuesto directamente en :3000
+[WARN ] DAST-22  SQL Server expuesto en :1433
+[PASS ] DAST-23  Rechazo de Content-Type no JSON
+[WARN ] DAST-24  Transporte cifrado (TLS)
+
+RESUMEN  PASS=21  FAIL=0  WARN=3  (total 24)
