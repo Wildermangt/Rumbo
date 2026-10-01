@@ -1,0 +1,124 @@
+# -----------------------------------------------------------------------------
+# Task Manager - Orquestación completa
+#   docker compose up --build
+#
+# Orden de arranque garantizado por healthchecks:
+#   sqlserver (healthy) -> db-init (completed) -> backend (healthy) -> frontend
+#
+# Todos los valores tienen default; se pueden sobrescribir con un archivo .env
+# (ver .env.example).
+# -----------------------------------------------------------------------------
+name: task-manager
+
+x-db-env: &db-env
+  MSSQL_SA_PASSWORD: ${MSSQL_SA_PASSWORD:-Str0ng!Passw0rd2024}
+  DB_NAME: ${DB_NAME:-TasksDb}
+  APP_DB_USER: ${APP_DB_USER:-tasks_app}
+  APP_DB_PASSWORD: ${APP_DB_PASSWORD:-TasksApp#2024Secure}
+
+services:
+  sqlserver:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    container_name: tasks-sqlserver
+    environment:
+      ACCEPT_EULA: "Y"
+      MSSQL_PID: ${MSSQL_PID:-Developer}
+      MSSQL_SA_PASSWORD: ${MSSQL_SA_PASSWORD:-Str0ng!Passw0rd2024}
+    ports:
+      - "${SQLSERVER_PORT:-1433}:1433"
+    volumes:
+      - mssql-data:/var/opt/mssql
+    healthcheck:
+      # Healthy solo cuando el motor acepta conexiones y responde consultas.
+      test:
+        - CMD-SHELL
+        - >-
+          /opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P "$${MSSQL_SA_PASSWORD}" -Q "SELECT 1" -b -l 3 > /dev/null
+          || /opt/mssql-tools/bin/sqlcmd -S localhost -U sa -P "$${MSSQL_SA_PASSWORD}" -Q "SELECT 1" -b -l 3 > /dev/null
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
+    restart: unless-stopped
+    networks: [backend-net]
+
+  # Job de inicialización: crea BD, tabla, índice, SPs, login de app y datos de ejemplo.
+  # Es idempotente: puede ejecutarse en cada `docker compose up`.
+  db-init:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    container_name: tasks-db-init
+    entrypoint: ["/bin/bash", "/database/setup-db.sh"]
+    environment:
+      <<: *db-env
+      DB_HOST: sqlserver
+      DB_PORT: 1433
+      SEED_DATA: ${SEED_DATA:-1}
+    volumes:
+      - ./database:/database:ro
+    depends_on:
+      sqlserver:
+        condition: service_healthy
+    restart: "no"
+    networks: [backend-net]
+
+  backend:
+    build:
+      context: ./backend
+    image: task-manager/backend:latest
+    container_name: tasks-backend
+    environment:
+      # Sin .env el arranque es en modo desarrollo (defaults OK para la demo).
+      # Con .env (NODE_ENV=production) la API exige secretos propios o se niega a arrancar (H-1).
+      NODE_ENV: ${NODE_ENV:-development}
+      PORT: 3000
+      CORS_ORIGIN: ${CORS_ORIGIN:-http://localhost:8080}
+      DB_HOST: sqlserver
+      DB_PORT: 1433
+      DB_NAME: ${DB_NAME:-TasksDb}
+      DB_USER: ${APP_DB_USER:-tasks_app}
+      DB_PASSWORD: ${APP_DB_PASSWORD:-TasksApp#2024Secure}
+      DB_ENCRYPT: "false"
+      DB_TRUST_SERVER_CERTIFICATE: "true"
+      JWT_SECRET: ${JWT_SECRET:-dev-only-secret-change-me-please-0123456789abcdef}
+      JWT_EXPIRES_IN: ${JWT_EXPIRES_IN:-1h}
+      AUTH_USERNAME: ${AUTH_USERNAME:-admin}
+      AUTH_PASSWORD: ${AUTH_PASSWORD:-admin123}
+    ports:
+      - "${BACKEND_PORT:-3000}:3000"
+    depends_on:
+      sqlserver:
+        condition: service_healthy
+      db-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3000/api/health > /dev/null || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    restart: unless-stopped
+    networks: [backend-net, frontend-net]
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        VITE_API_BASE_URL: /api
+    image: task-manager/frontend:latest
+    container_name: tasks-frontend
+    environment:
+      BACKEND_URL: http://backend:3000
+    ports:
+      - "${FRONTEND_PORT:-8080}:8080"
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+    networks: [frontend-net]
+
+volumes:
+  mssql-data:
+
+networks:
+  backend-net:
+  frontend-net:

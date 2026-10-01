@@ -1,0 +1,26 @@
+# -----------------------------------------------------------------------------
+# Override de producción. Úsalo junto al base:
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+#
+# Endurecimiento frente a los hallazgos del informe de seguridad:
+#   - H-1: exige secretos propios (NODE_ENV=production + guardia anti-default).
+#   - H-4: NO publica los puertos internos (SQL Server y backend) en el host;
+#          solo el frontend queda expuesto.
+# Requiere un archivo .env con secretos reales (ver .env.example).
+# -----------------------------------------------------------------------------
+services:
+  sqlserver:
+    # `!reset` descarta los puertos del base: SQL Server solo vive en backend-net.
+    ports: !reset []
+
+  backend:
+    environment:
+      NODE_ENV: production
+    # El backend solo se alcanza vía la red interna (lo usa el frontend/nginx).
+    ports: !reset []
+
+  frontend:
+    # Único servicio publicado. Cambia el puerto host con FRONTEND_PORT.
+    ports:
+      - "${FRONTEND_PORT:-8080}:8080"
+    restart: always
