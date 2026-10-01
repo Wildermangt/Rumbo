@@ -1,0 +1,145 @@
+@import './tokens.css';
+
+/* =============================================================================
+   Estilos globales — Rumbo. Estilo sobrio: superficies sólidas, sombras suaves
+   y animaciones mínimas.
+   ============================================================================= */
+* {
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+.v-application,
+body {
+  font-family: var(--font-sans) !important;
+  background: var(--bg-base) !important;
+  color: var(--text);
+}
+
+.v-application__wrap {
+  background: var(--bg-base);
+}
+
+/* Scrollbar afinada */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--surface-border-strong);
+  border-radius: var(--radius-full);
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--text-muted);
+  background-clip: padding-box;
+}
+
+/* Foco accesible (WCAG) */
+:where(button, a, input, textarea, [tabindex]):focus-visible {
+  outline: 2px solid var(--accent-1);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+
+/* ---------- Superficie base (tarjetas y paneles) ---------- */
+.glass {
+  background: var(--surface);
+  border: 1px solid var(--surface-border);
+  box-shadow: var(--shadow-sm);
+  border-radius: var(--radius-lg);
+  position: relative;
+}
+
+/* Acento de texto en color sólido (sin degradado animado) */
+.text-gradient {
+  color: var(--accent-1);
+}
+
+/* Reveal: aparición simple al entrar en viewport (sin desplazamientos grandes) */
+.reveal {
+  opacity: 0;
+  transition: opacity var(--dur-3) var(--ease-out);
+}
+.reveal.is-visible {
+  opacity: 1;
+}
+
+/* Skeleton con pulso discreto */
+.skeleton {
+  position: relative;
+  overflow: hidden;
+  background: var(--skeleton-base);
+  border-radius: var(--radius-sm);
+  animation: skPulse 1.6s ease-in-out infinite;
+}
+@keyframes skPulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.55;
+  }
+}
+
+/* ---------- Botón de acento ---------- */
+.btn-accent {
+  background: var(--accent-1) !important;
+  color: #fff !important;
+  box-shadow: var(--shadow-accent);
+  transition:
+    background var(--dur-1) var(--ease-out),
+    box-shadow var(--dur-1) var(--ease-out);
+}
+.btn-accent:hover {
+  background: var(--accent-2) !important;
+}
+
+/* Transición para el "pop" del chip de estado (discreto) */
+.pop-enter-active {
+  transition:
+    opacity var(--dur-2) var(--ease-out),
+    transform var(--dur-2) var(--ease-out);
+}
+.pop-enter-from {
+  opacity: 0;
+  transform: translateY(-2px);
+}
+.pop-leave-active {
+  transition: opacity var(--dur-1) var(--ease-out);
+  position: absolute;
+}
+.pop-leave-to {
+  opacity: 0;
+}
+
+/* Barra lateral de las tarjetas KPI */
+@keyframes growBar {
+  from {
+    transform: scaleY(0);
+  }
+  to {
+    transform: scaleY(1);
+  }
+}
+
+/* Respeto por quienes reducen el movimiento */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+  .reveal {
+    opacity: 1;
+  }
+}
