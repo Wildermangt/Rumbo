@@ -83,6 +83,10 @@ services:
       JWT_EXPIRES_IN: ${JWT_EXPIRES_IN:-1h}
       AUTH_USERNAME: ${AUTH_USERNAME:-admin}
       AUTH_PASSWORD: ${AUTH_PASSWORD:-admin123}
+      UPLOAD_DIR: /app/uploads
+      UPLOAD_MAX_MB: ${UPLOAD_MAX_MB:-5}
+    volumes:
+      - uploads-data:/app/uploads
     ports:
       - "${BACKEND_PORT:-3000}:3000"
     depends_on:
@@ -118,6 +122,7 @@ services:
 
 volumes:
   mssql-data:
+  uploads-data:
 
 networks:
   backend-net:

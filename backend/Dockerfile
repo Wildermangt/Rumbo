@@ -21,11 +21,15 @@ RUN npm ci --omit=dev --no-audit --no-fund && npm cache clean --force
 # ---------- 4) Imagen final mínima ----------
 FROM node:22-alpine AS runtime
 ENV NODE_ENV=production \
-    PORT=3000
+    PORT=3000 \
+    UPLOAD_DIR=/app/uploads
 WORKDIR /app
 
 # tini: PID 1 correcto (reenvía señales y recolecta zombies)
 RUN apk add --no-cache tini
+
+# Carpeta de adjuntos con permisos para el usuario node (el volumen hereda esta propiedad).
+RUN mkdir -p /app/uploads && chown -R node:node /app/uploads
 
 COPY --from=prod-deps --chown=node:node /app/node_modules ./node_modules
 COPY --from=build --chown=node:node /app/dist ./dist
