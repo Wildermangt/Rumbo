@@ -59,14 +59,14 @@ jobs:
       - name: Build frontend image
         run: docker build -t task-manager/frontend:ci ./frontend
       - name: Scan backend image (Trivy)
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@master
         with:
           image-ref: task-manager/backend:ci
           severity: CRITICAL,HIGH
           ignore-unfixed: true
           exit-code: '0' # informativo; súbelo a '1' para bloquear ante CVEs corregibles
       - name: Scan frontend image (Trivy)
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@master
         with:
           image-ref: task-manager/frontend:ci
           severity: CRITICAL,HIGH
