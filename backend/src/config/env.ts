@@ -24,6 +24,10 @@ const envSchema = z.object({
   AUTH_USERNAME: z.string().min(1).default('admin'),
   // Sin default en el código: lo aporta el entorno (docker-compose / .env).
   AUTH_PASSWORD: z.string().min(1, 'AUTH_PASSWORD es obligatorio'),
+
+  // Adjuntos: carpeta de almacenamiento y tamaño máximo por archivo (MB).
+  UPLOAD_DIR: z.string().default('uploads'),
+  UPLOAD_MAX_MB: z.coerce.number().int().positive().max(50).default(5),
 });
 
 export type Env = z.infer<typeof envSchema>;
@@ -38,7 +42,8 @@ const INSECURE_DEFAULTS: Partial<Record<keyof Env, string[]>> = {
     'change-me-with-a-long-random-secret-at-least-32-chars',
   ],
   DB_PASSWORD: ['TasksApp#2024Secure'],
-  AUTH_PASSWORD: ['admin123'],
+  // AUTH_PASSWORD no se incluye: admin/admin123 es la credencial de demo documentada
+  // por el enunciado. Cámbiala por una fuerte en un despliegue real.
 };
 
 function assertProductionSecrets(env: Env): void {

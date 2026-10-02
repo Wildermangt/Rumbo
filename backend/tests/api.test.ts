@@ -2,13 +2,15 @@ import request from 'supertest';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { createApp } from '../src/app';
 import type {
+  AddAttachmentInput,
   CreateTaskInput,
   FindTasksParams,
   FindTasksResult,
   RawStats,
   TaskRepository,
+  UpdateTaskInput,
 } from '../src/repositories/task.repository';
-import type { StatsGranularity } from '../src/types/task';
+import type { AttachmentFile, Notifications, StatsBucketUnit, StatsRange } from '../src/types/task';
 import { AuthService } from '../src/services/auth.service';
 import { TaskService } from '../src/services/task.service';
 import type { Task, TaskStatus } from '../src/types/task';
@@ -27,6 +29,8 @@ class InMemoryTaskRepository implements TaskRepository {
     sort,
     dateFrom,
     dateTo,
+    priority,
+    category,
   }: FindTasksParams): Promise<FindTasksResult> {
     const needle = search?.trim().toLowerCase();
     const byTitle = sort === 'title_asc' || sort === 'title_desc';
@@ -39,6 +43,8 @@ class InMemoryTaskRepository implements TaskRepository {
         (t) =>
           !needle || t.title.toLowerCase().includes(needle) || (t.description?.toLowerCase().includes(needle) ?? false),
       )
+      .filter((t) => !priority || t.priority === priority)
+      .filter((t) => !category || t.category === category)
       .filter((t) => from === null || t.createdAt.getTime() >= from)
       .filter((t) => toExcl === null || t.createdAt.getTime() < toExcl)
       .sort((a, b) =>
@@ -50,16 +56,35 @@ class InMemoryTaskRepository implements TaskRepository {
     return { items: filtered.slice(start, start + pageSize), total: filtered.length };
   }
 
-  async create({ title, description }: CreateTaskInput): Promise<Task> {
+  async create({ title, description, priority, category, dueDate, recurrence }: CreateTaskInput): Promise<Task> {
     const task: Task = {
       id: this.nextId++,
       title,
       description,
       status: 'PENDING',
+      priority,
+      category,
+      dueDate,
+      recurrence,
       createdAt: new Date(),
       completedAt: null,
     };
     this.tasks.push(task);
+    return task;
+  }
+
+  async update(
+    id: number,
+    { title, description, priority, category, dueDate, recurrence }: UpdateTaskInput,
+  ): Promise<Task> {
+    const task = this.tasks.find((t) => t.id === id);
+    if (!task) throw AppError.notFound('La tarea solicitada no existe.');
+    task.title = title;
+    task.description = description;
+    task.priority = priority;
+    task.category = category;
+    task.dueDate = dueDate;
+    task.recurrence = recurrence;
     return task;
   }
 
@@ -68,10 +93,52 @@ class InMemoryTaskRepository implements TaskRepository {
     if (!task) throw AppError.notFound('La tarea solicitada no existe.');
     task.status = status;
     task.completedAt = status === 'COMPLETED' ? new Date() : null;
+    // Recurrencia: al completar, genera la siguiente ocurrencia.
+    if (status === 'COMPLETED' && task.recurrence !== 'NONE') {
+      const base = task.dueDate ? new Date(`${task.dueDate}T00:00:00Z`) : new Date();
+      const add = { DAILY: 1, WEEKLY: 7, MONTHLY: 30, NONE: 0 }[task.recurrence];
+      base.setUTCDate(base.getUTCDate() + add);
+      this.tasks.push({
+        id: this.nextId++,
+        title: task.title,
+        description: task.description,
+        status: 'PENDING',
+        priority: task.priority,
+        category: task.category,
+        dueDate: base.toISOString().slice(0, 10),
+        recurrence: task.recurrence,
+        createdAt: new Date(),
+        completedAt: null,
+      });
+    }
     return task;
   }
 
-  async getStats(_granularity: StatsGranularity): Promise<RawStats> {
+  async remove(id: number): Promise<void> {
+    const i = this.tasks.findIndex((t) => t.id === id);
+    if (i === -1) throw AppError.notFound('La tarea solicitada no existe.');
+    this.tasks.splice(i, 1);
+  }
+
+  async bulkUpdateStatus(ids: number[], status: TaskStatus): Promise<number> {
+    let affected = 0;
+    for (const t of this.tasks) {
+      if (ids.includes(t.id)) {
+        t.status = status;
+        t.completedAt = status === 'COMPLETED' ? new Date() : null;
+        affected++;
+      }
+    }
+    return affected;
+  }
+
+  async bulkRemove(ids: number[]): Promise<number> {
+    const before = this.tasks.length;
+    this.tasks = this.tasks.filter((t) => !ids.includes(t.id));
+    return before - this.tasks.length;
+  }
+
+  async getStats(_bucket: StatsBucketUnit, _range?: StatsRange): Promise<RawStats> {
     const completed = this.tasks.filter((t) => t.completedAt);
     const startOfMonth = (d: Date) => new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1));
     const group = (rows: Date[]) => {
@@ -92,6 +159,64 @@ class InMemoryTaskRepository implements TaskRepository {
       created: group(this.tasks.map((t) => t.createdAt)),
       completed: group(completed.map((t) => t.completedAt as Date)),
     };
+  }
+
+  async getNotifications(days: number): Promise<Notifications> {
+    const today = new Date().toISOString().slice(0, 10);
+    const limit = new Date(Date.now() + days * 86_400_000).toISOString().slice(0, 10);
+    const pending = this.tasks.filter((t) => t.status === 'PENDING' && t.dueDate);
+    const overdue = pending.filter((t) => t.dueDate! < today);
+    const dueSoon = pending.filter((t) => t.dueDate! >= today && t.dueDate! <= limit);
+    const items = [...overdue, ...dueSoon].map((t) => ({
+      id: t.id,
+      title: t.title,
+      priority: t.priority,
+      category: t.category,
+      dueDate: t.dueDate,
+      kind: (t.dueDate! < today ? 'OVERDUE' : 'DUE_SOON') as 'OVERDUE' | 'DUE_SOON',
+    }));
+    return { overdue: overdue.length, dueSoon: dueSoon.length, items };
+  }
+
+  async getDueTasks() {
+    return this.tasks
+      .filter((t) => t.status === 'PENDING' && t.dueDate)
+      .map((t) => ({
+        id: t.id,
+        title: t.title,
+        description: t.description,
+        priority: t.priority,
+        category: t.category,
+        dueDate: t.dueDate as string,
+      }));
+  }
+
+  private attachments: AttachmentFile[] = [];
+  private nextAttId = 1;
+  async addAttachment(taskId: number, input: AddAttachmentInput) {
+    if (!this.tasks.some((t) => t.id === taskId)) throw AppError.notFound('La tarea solicitada no existe.');
+    const att: AttachmentFile = { id: this.nextAttId++, taskId, ...input, createdAt: new Date() };
+    this.attachments.push(att);
+    const { storedName: _s, ...rest } = att;
+    void _s;
+    return rest;
+  }
+  async getAttachments(taskId: number) {
+    return this.attachments
+      .filter((a) => a.taskId === taskId)
+      .map(({ storedName: _s, ...rest }) => {
+        void _s;
+        return rest;
+      });
+  }
+  async getAttachment(id: number) {
+    return this.attachments.find((a) => a.id === id) ?? null;
+  }
+  async deleteAttachment(id: number) {
+    const i = this.attachments.findIndex((a) => a.id === id);
+    if (i === -1) throw AppError.notFound('El adjunto solicitado no existe.');
+    const [removed] = this.attachments.splice(i, 1);
+    return removed!.storedName;
   }
 }
 
@@ -270,6 +395,113 @@ describe('Tasks API', () => {
     it('responde 400 con id no numérico', async () => {
       const res = await request(app).patch('/api/tasks/abc/status').set(auth()).send({ status: 'PENDING' });
       expect(res.status).toBe(400);
+    });
+
+    it('edita una tarea (PUT) y responde 404 si no existe', async () => {
+      await request(app).post('/api/tasks').set(auth()).send({ title: 'Original' });
+      const ok = await request(app).put('/api/tasks/1').set(auth()).send({ title: 'Editada', description: 'nueva' });
+      expect(ok.status).toBe(200);
+      expect(ok.body.data).toMatchObject({ id: 1, title: 'Editada', description: 'nueva' });
+      const missing = await request(app).put('/api/tasks/999').set(auth()).send({ title: 'X' });
+      expect(missing.status).toBe(404);
+    });
+
+    it('elimina una tarea (DELETE 204) y responde 404 si no existe', async () => {
+      await request(app).post('/api/tasks').set(auth()).send({ title: 'Borrar' });
+      const ok = await request(app).delete('/api/tasks/1').set(auth());
+      expect(ok.status).toBe(204);
+      const list = await request(app).get('/api/tasks').set(auth());
+      expect(list.body.meta.total).toBe(0);
+      const missing = await request(app).delete('/api/tasks/1').set(auth());
+      expect(missing.status).toBe(404);
+    });
+
+    it('acciones en lote: completar y eliminar varias (selección múltiple)', async () => {
+      for (const t of ['A', 'B', 'C']) await request(app).post('/api/tasks').set(auth()).send({ title: t });
+      const done = await request(app)
+        .post('/api/tasks/bulk/status')
+        .set(auth())
+        .send({ ids: [1, 2], status: 'COMPLETED' });
+      expect(done.status).toBe(200);
+      expect(done.body.data.affected).toBe(2);
+      const completed = await request(app).get('/api/tasks?status=COMPLETED').set(auth());
+      expect(completed.body.meta.total).toBe(2);
+
+      const del = await request(app)
+        .post('/api/tasks/bulk/delete')
+        .set(auth())
+        .send({ ids: [1, 2, 3] });
+      expect(del.status).toBe(200);
+      expect(del.body.data.affected).toBe(3);
+      const all = await request(app).get('/api/tasks').set(auth());
+      expect(all.body.meta.total).toBe(0);
+    });
+
+    it('rechaza lote sin ids (400)', async () => {
+      const res = await request(app).post('/api/tasks/bulk/delete').set(auth()).send({ ids: [] });
+      expect(res.status).toBe(400);
+    });
+
+    it('crea con prioridad, categoría y vencimiento, y filtra por prioridad', async () => {
+      const created = await request(app)
+        .post('/api/tasks')
+        .set(auth())
+        .send({ title: 'Urgente', priority: 'high', category: 'Trabajo', dueDate: '2026-12-31' });
+      expect(created.status).toBe(201);
+      expect(created.body.data).toMatchObject({ priority: 'HIGH', category: 'Trabajo', dueDate: '2026-12-31' });
+
+      await request(app).post('/api/tasks').set(auth()).send({ title: 'Normal' }); // priority MEDIUM por defecto
+      const high = await request(app).get('/api/tasks?priority=HIGH').set(auth());
+      expect(high.body.meta.total).toBe(1);
+      expect(high.body.data[0].title).toBe('Urgente');
+
+      const bad = await request(app).get('/api/tasks?priority=URGENTE').set(auth());
+      expect(bad.status).toBe(400);
+    });
+
+    it('rechaza una fecha de vencimiento con formato inválido (400)', async () => {
+      const res = await request(app).post('/api/tasks').set(auth()).send({ title: 'x', dueDate: '31-12-2026' });
+      expect(res.status).toBe(400);
+    });
+
+    it('recurrencia: al completar una tarea que se repite, crea la siguiente', async () => {
+      await request(app)
+        .post('/api/tasks')
+        .set(auth())
+        .send({ title: 'Reporte semanal', recurrence: 'weekly', dueDate: '2026-10-05' });
+      const before = await request(app).get('/api/tasks').set(auth());
+      expect(before.body.meta.total).toBe(1);
+
+      await request(app).patch('/api/tasks/1/status').set(auth()).send({ status: 'COMPLETED' });
+      const after = await request(app).get('/api/tasks').set(auth());
+      expect(after.body.meta.total).toBe(2); // se generó la siguiente ocurrencia
+      const next = after.body.data.find((t: { status: string }) => t.status === 'PENDING');
+      expect(next.dueDate).toBe('2026-10-12'); // +7 días
+      expect(next.recurrence).toBe('WEEKLY');
+    });
+
+    it('calendario: devuelve un feed .ics con las tareas con vencimiento', async () => {
+      await request(app).post('/api/tasks').set(auth()).send({ title: 'Con fecha', dueDate: '2026-11-20' });
+      const res = await request(app).get('/api/tasks/calendar.ics').set(auth());
+      expect(res.status).toBe(200);
+      expect(res.headers['content-type']).toContain('text/calendar');
+      expect(res.text).toContain('BEGIN:VCALENDAR');
+      expect(res.text).toContain('SUMMARY:Con fecha');
+      expect(res.text).toContain('DTSTART;VALUE=DATE:20261120');
+    });
+
+    it('notificaciones: cuenta vencidas y próximas a vencer', async () => {
+      const ayer = new Date(Date.now() - 86_400_000).toISOString().slice(0, 10);
+      const mañana = new Date(Date.now() + 86_400_000).toISOString().slice(0, 10);
+      await request(app).post('/api/tasks').set(auth()).send({ title: 'Vencida', dueDate: ayer });
+      await request(app).post('/api/tasks').set(auth()).send({ title: 'Próxima', dueDate: mañana });
+      await request(app).post('/api/tasks').set(auth()).send({ title: 'Sin fecha' });
+
+      const res = await request(app).get('/api/tasks/notifications?days=3').set(auth());
+      expect(res.status).toBe(200);
+      expect(res.body.data.overdue).toBe(1);
+      expect(res.body.data.dueSoon).toBe(1);
+      expect(res.body.data.items).toHaveLength(2);
     });
 
     it('devuelve estadísticas con totales y serie temporal', async () => {

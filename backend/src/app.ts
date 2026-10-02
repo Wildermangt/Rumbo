@@ -19,7 +19,7 @@ export function createApp({ corsOrigin, ...deps }: AppOptions): Express {
   app.use(
     cors({
       origin: corsOrigin === '*' ? true : corsOrigin.split(',').map((o) => o.trim()),
-      methods: ['GET', 'POST', 'PATCH', 'OPTIONS'],
+      methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
       allowedHeaders: ['Content-Type', 'Authorization'],
     }),
   );
