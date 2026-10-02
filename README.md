@@ -1,13 +1,13 @@
-# Task Manager
+# Rumbo
 
-Aplicación de gestión de tareas. Incluye login con JWT, paginación, filtros y un panel de análisis. Todo se levanta con un solo comando.
+Aplicación de gestión de tareas. Incluye login con JWT, paginación, filtros, prioridades, categorías, fechas de vencimiento, tareas recurrentes, adjuntos con vista previa, notificaciones, exportación a calendario y un panel de análisis. Todo se levanta con un solo comando.
 
 ## Tecnologías
 
 | Capa | Qué usa |
 |------|---------|
 | Frontend | Vue 3 con Composition API, Vuetify 3, TypeScript y Vite |
-| Backend | Node.js, Express, TypeScript, JWT y Zod |
+| Backend | Node.js, Express, TypeScript, JWT, Zod y Multer (adjuntos) |
 | Base de datos | SQL Server 2022 con stored procedures e índice |
 | Despliegue | Docker y Docker Compose |
 
@@ -89,24 +89,49 @@ Tabla `Tasks` con estas columnas:
 - `Title`: texto de hasta 150 caracteres.
 - `Description`: texto opcional.
 - `Status`: `PENDING` o `COMPLETED`. Por defecto `PENDING`.
+- `Priority`: `LOW`, `MEDIUM` o `HIGH`. Por defecto `MEDIUM`.
+- `Category`: texto corto opcional (por ejemplo Finanzas o Clientes).
+- `DueDate`: fecha de vencimiento opcional.
+- `Recurrence`: `NONE`, `DAILY`, `WEEKLY` o `MONTHLY`. Por defecto `NONE`. Al completar una tarea recurrente se crea la siguiente ocurrencia con el vencimiento adelantado.
 - `CreatedAt`: fecha de creación.
 - `CompletedAt`: fecha en que se completó. Queda vacía mientras está pendiente.
 
-Dos índices para el listado:
+Tabla `TaskAttachments` para los archivos adjuntos. Guarda el nombre original, el nombre en disco, el tipo y el tamaño, y se borra en cascada si se elimina la tarea.
+
+Índices para el listado:
 
 - `IX_Tasks_Status_CreatedAt` sobre estado y fecha. Sirve cuando se filtra por estado.
 - `IX_Tasks_CreatedAt` sobre fecha. Sirve para la vista por defecto, "Todas", donde no hay filtro de estado.
+- `IX_Tasks_Category_CreatedAt` sobre categoría y fecha. Resuelve el filtro por categoría con un seek (sin este índice hacía un recorrido completo de la tabla).
+- `IX_Tasks_Due` (filtrado sobre `Status = PENDING`) para las notificaciones de vencimiento.
 
 Con ellos, el listado ordenado por fecha nunca necesita un paso de ordenamiento, ni en orden descendente ni en ascendente.
 
 Procedimientos almacenados. Todos usan `TRY/CATCH` y transacción:
 
-- `sp_GetTasks`: devuelve el total y la página pedida. Filtra por estado y fechas, busca por texto y ordena por fecha o por título.
+- `sp_GetTasks`: devuelve el total y la página pedida. Filtra por estado, prioridad, categoría y fechas, busca por texto y ordena por fecha, título, vencimiento o prioridad (mayor a menor o menor a mayor).
 - `sp_CreateTask`: inserta una tarea y devuelve el registro creado.
-- `sp_UpdateTaskStatus`: cambia el estado y valida que la tarea exista.
+- `sp_UpdateTask`: edita título, descripción, prioridad, categoría, vencimiento y recurrencia (CRUD).
+- `sp_UpdateTaskStatus`: cambia el estado, valida que la tarea exista y genera la siguiente ocurrencia si es recurrente.
+- `sp_DeleteTask`: elimina una tarea (CRUD).
+- `sp_BulkUpdateStatus` y `sp_BulkDeleteTasks`: cambian el estado o eliminan varias tareas a la vez (selección múltiple).
 - `sp_GetTaskStats`: agrega datos por semana, mes o año para el panel de análisis.
+- `sp_GetNotifications` y `sp_GetDueTasks`: listan las tareas vencidas o próximas a vencer.
+- `sp_AddAttachment`, `sp_GetAttachments`, `sp_GetAttachment` y `sp_DeleteAttachment`: gestionan los adjuntos.
 
 El backend se conecta con un usuario que solo puede ejecutar los procedimientos. No puede leer las tablas directamente.
+
+### Pruebas y análisis de la base de datos
+
+En `database/tests/` hay dos scripts que se ejecutan con sqlcmd dentro del contenedor de SQL Server:
+
+- `test_procedures.sql`: 36 pruebas que ejercitan los 12 procedimientos con casos correctos, límites y errores de negocio (50400 y 50404), además de la recurrencia y el borrado en cascada de adjuntos. Crea sus propias filas (prefijo `ZZTEST`) y las borra al terminar, así que no toca los datos de ejemplo. Con el flag `-b`, sqlcmd devuelve código de error si alguna prueba falla.
+- `analyze_performance.sql`: muestra los índices, su uso real, los índices que el optimizador echa en falta y el plan de ejecución de las consultas principales (para ver si hacen seek o scan).
+
+```bash
+docker exec -it tasks-sqlserver bash -lc \
+  '/opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P "$MSSQL_SA_PASSWORD" -C -No -d TasksDb -b -i /tmp/test_procedures.sql'
+```
 
 
 ## API
@@ -119,10 +144,20 @@ Todas las respuestas tienen el mismo formato. Las correctas traen `success: true
 | POST | `/api/auth/login` | No | Recibe usuario y contraseña, devuelve un token |
 | GET | `/api/tasks` | Sí | Lista tareas con filtros, búsqueda, orden y paginación |
 | POST | `/api/tasks` | Sí | Crea una tarea |
+| PUT | `/api/tasks/:id` | Sí | Edita la tarea (título, descripción, prioridad, categoría, vencimiento, recurrencia) |
 | PATCH | `/api/tasks/:id/status` | Sí | Cambia el estado de una tarea |
+| DELETE | `/api/tasks/:id` | Sí | Elimina una tarea |
+| POST | `/api/tasks/bulk/status` | Sí | Cambia el estado de varias (selección múltiple) |
+| POST | `/api/tasks/bulk/delete` | Sí | Elimina varias (selección múltiple) |
 | GET | `/api/tasks/stats` | Sí | Métricas para el panel de análisis |
+| GET | `/api/tasks/notifications` | Sí | Tareas vencidas y próximas a vencer |
+| GET | `/api/tasks/calendar.ics` | Sí | Descarga las tareas con vencimiento en formato iCalendar |
+| GET | `/api/tasks/:id/attachments` | Sí | Lista los adjuntos de una tarea |
+| POST | `/api/tasks/:id/attachments` | Sí | Sube un adjunto (multipart, hasta 5 MB) |
+| GET | `/api/tasks/attachments/:id/download` | Sí | Descarga o previsualiza un adjunto |
+| DELETE | `/api/tasks/attachments/:id` | Sí | Elimina un adjunto |
 
-Filtros disponibles en `GET /api/tasks`: estado, página, tamaño de página, búsqueda por texto, orden por fecha o por título y rango de fechas de creación.
+Filtros disponibles en `GET /api/tasks`: estado, prioridad, categoría, página, tamaño de página, búsqueda por texto, rango de fechas de creación y orden (fecha, título A→Z o Z→A, vencimiento, y prioridad de mayor a menor o de menor a mayor).
 
 Ejemplo de uso:
 
@@ -142,13 +177,16 @@ Códigos de respuesta que maneja la API: 200, 201, 400, 401, 404, 413, 429, 500 
 
 La aplicación tiene dos pantallas principales:
 
-Pantalla de tareas. Muestra tarjetas de resumen, un buscador, filtros por estado y por rango de fechas, orden y una tabla con paginación. Se pueden crear tareas y cambiar su estado. Hay columnas de fecha de creación y de culminación.
+Pantalla de tareas. Muestra tarjetas de resumen, un buscador, filtros por estado, prioridad, categoría y rango de fechas, varias opciones de orden y una tabla con paginación. Se pueden crear, editar, completar y eliminar tareas, tanto una a una como en lote (selección múltiple). Hay columnas de prioridad, vencimiento, creación y culminación.
+
+Cada tarea puede tener prioridad, categoría, fecha de vencimiento y repetición (diaria, semanal o mensual). También admite archivos adjuntos: se suben desde el formulario de edición y, al hacer clic en uno, se abre una vista previa sin necesidad de descargarlo (imágenes, PDF y texto se ven dentro de la aplicación). Desde la lista se puede exportar un calendario `.ics` para el correo o añadir una tarea a Google Calendar.
 
 Panel de análisis. Muestra indicadores y un gráfico de tareas creadas contra completadas. Se puede ver por semana, mes o año.
 
 Otros detalles:
 
 - Modo claro y oscuro, con la preferencia guardada.
+- Campana de notificaciones con las tareas vencidas y próximas a vencer.
 - Estados de carga visibles con skeletons y errores visibles con avisos.
 - La lógica de tareas está en un composable propio llamado `useTasks`.
 - Si el token caduca, la sesión se cierra y vuelve al login.
