@@ -72,13 +72,15 @@ Los servicios se encienden en orden y cada uno espera a que el anterior esté li
 .
 ├── backend/      API en Express + TypeScript
 ├── frontend/     Aplicación en Vue 3 + Vuetify
-├── database/     init.sql (tabla, índice, procedimientos) y setup-db.sh
-├── docs/         Informes en PDF y capturas
+├── database/     init.sql (tabla, índice, procedimientos), setup-db.sh y tests
+├── docs/         ARQUITECTURA.md, informes en PDF y capturas
 ├── docker-compose.yml
 └── .env.example
 ```
 
 El backend está organizado en capas: rutas, controladores, servicios, repositorios, middlewares y configuración.
+
+Para una explicación completa de la infraestructura (servicios, redes, flujo de datos, seguridad, pruebas y decisiones de diseño) consulta [docs/ARQUITECTURA.md](docs/ARQUITECTURA.md).
 
 
 ## Base de datos
