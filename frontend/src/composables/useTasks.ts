@@ -1,7 +1,7 @@
 import { reactive, readonly, ref, watch } from 'vue';
 import { getErrorMessage } from '@/services/http';
 import { tasksApi, type TaskSort } from '@/services/tasks.api';
-import type { CreateTaskPayload, Pagination, Task, TaskFilter, TaskStatus } from '@/types/task';
+import type { CreateTaskPayload, Pagination, PriorityFilter, Task, TaskFilter, TaskStatus } from '@/types/task';
 
 /**
  * Encapsula el estado y las operaciones de tareas.
@@ -14,8 +14,11 @@ export function useTasks(initialPageSize = 10) {
   const loading = ref(false);
   const saving = ref(false);
   const updatingIds = ref<number[]>([]);
+  const selectedIds = ref<number[]>([]);
   const error = ref<string | null>(null);
   const filterStatus = ref<TaskFilter>('ALL');
+  const filterPriority = ref<PriorityFilter>('ALL');
+  const filterCategory = ref<string>('');
   const search = ref('');
   const sort = ref<TaskSort>('newest');
   const dateFrom = ref('');
@@ -41,6 +44,8 @@ export function useTasks(initialPageSize = 10) {
           sort: sort.value,
           dateFrom: dateFrom.value || undefined,
           dateTo: dateTo.value || undefined,
+          priority: filterPriority.value,
+          category: filterCategory.value || undefined,
         },
         current.signal,
       );
@@ -83,6 +88,28 @@ export function useTasks(initialPageSize = 10) {
     }
   }
 
+  async function editTask(id: number, payload: CreateTaskPayload): Promise<Task> {
+    saving.value = true;
+    try {
+      const updated = await tasksApi.update(id, payload);
+      tasks.value = tasks.value.map((t) => (t.id === id ? updated : t));
+      return updated;
+    } finally {
+      saving.value = false;
+    }
+  }
+
+  async function deleteTask(id: number): Promise<void> {
+    updatingIds.value = [...updatingIds.value, id];
+    try {
+      await tasksApi.remove(id);
+      selectedIds.value = selectedIds.value.filter((x) => x !== id);
+      await fetchTasks();
+    } finally {
+      updatingIds.value = updatingIds.value.filter((x) => x !== id);
+    }
+  }
+
   async function updateStatus(id: number, status: TaskStatus): Promise<Task> {
     updatingIds.value = [...updatingIds.value, id];
     try {
@@ -100,9 +127,41 @@ export function useTasks(initialPageSize = 10) {
 
   const isUpdating = (id: number): boolean => updatingIds.value.includes(id);
 
-  // Filtro de estado, orden y fechas: recargan de inmediato desde la página 1.
-  // El rango admite extremos abiertos (solo desde, o solo hasta).
-  watch([filterStatus, sort, dateFrom, dateTo], () => {
+  // ----- Selección múltiple y acciones en lote -----
+  async function bulkStatus(status: TaskStatus): Promise<number> {
+    if (selectedIds.value.length === 0) return 0;
+    saving.value = true;
+    try {
+      const affected = await tasksApi.bulkStatus([...selectedIds.value], status);
+      selectedIds.value = [];
+      await fetchTasks();
+      return affected;
+    } finally {
+      saving.value = false;
+    }
+  }
+
+  async function bulkDelete(): Promise<number> {
+    if (selectedIds.value.length === 0) return 0;
+    saving.value = true;
+    try {
+      const affected = await tasksApi.bulkRemove([...selectedIds.value]);
+      selectedIds.value = [];
+      pagination.page = 1;
+      await fetchTasks();
+      return affected;
+    } finally {
+      saving.value = false;
+    }
+  }
+
+  function clearSelection(): void {
+    selectedIds.value = [];
+  }
+
+  // Filtros (estado, prioridad, categoría), orden y fechas: recargan desde la página 1.
+  // El rango de fechas admite extremos abiertos (solo desde, o solo hasta).
+  watch([filterStatus, filterPriority, filterCategory, sort, dateFrom, dateTo], () => {
     if (dateFrom.value && dateTo.value && dateFrom.value > dateTo.value) return; // rango inválido
     pagination.page = 1;
     void fetchTasks();
@@ -135,7 +194,10 @@ export function useTasks(initialPageSize = 10) {
     saving: readonly(saving),
     error: readonly(error),
     pagination: readonly(pagination),
+    selectedIds,
     filterStatus,
+    filterPriority,
+    filterCategory,
     search,
     sort,
     dateFrom,
@@ -143,7 +205,12 @@ export function useTasks(initialPageSize = 10) {
     fetchTasks,
     setPage,
     createTask,
+    editTask,
     updateStatus,
+    deleteTask,
+    bulkStatus,
+    bulkDelete,
+    clearSelection,
     isUpdating,
     clearSearch,
     clearDates,

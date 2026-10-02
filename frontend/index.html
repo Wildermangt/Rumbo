@@ -12,9 +12,163 @@
       href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=Inter:wght@400;500;600&display=swap"
       rel="stylesheet"
     />
+
+    <!-- Define el tema del splash antes de pintar, para que el fondo no destelle -->
+    <script>
+      (function () {
+        try {
+          var t = localStorage.getItem('tasks.theme');
+          if (t !== 'dark' && t !== 'light') {
+            t = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+          }
+          document.documentElement.setAttribute('data-splash-theme', t);
+        } catch (e) {
+          document.documentElement.setAttribute('data-splash-theme', 'light');
+        }
+      })();
+    </script>
+
+    <!-- Pantalla de inicio: logo de Rumbo durante 5 s mientras arranca la app -->
+    <style>
+      #splash {
+        --splash-bg: #f4f6fa;
+        --splash-fg: #0f172a;
+        --splash-muted: #64748b;
+        --splash-accent: #2563eb;
+        position: fixed;
+        inset: 0;
+        z-index: 99999;
+        display: grid;
+        place-items: center;
+        background: var(--splash-bg);
+        font-family: 'Plus Jakarta Sans', system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+        animation: splashOut 0.6s ease 5s forwards;
+      }
+      :root[data-splash-theme='dark'] #splash {
+        --splash-bg: #0b1120;
+        --splash-fg: #f1f5f9;
+        --splash-muted: #8290a6;
+      }
+      @keyframes splashOut {
+        to {
+          opacity: 0;
+          visibility: hidden;
+        }
+      }
+      .splash__inner {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 18px;
+        animation: splashIn 0.6s cubic-bezier(0.16, 1, 0.3, 1) both;
+      }
+      @keyframes splashIn {
+        from {
+          opacity: 0;
+          transform: translateY(8px) scale(0.98);
+        }
+        to {
+          opacity: 1;
+          transform: none;
+        }
+      }
+      .splash__badge {
+        width: 72px;
+        height: 72px;
+        border-radius: 18px;
+        display: grid;
+        place-items: center;
+        background: linear-gradient(135deg, #2563eb, #0ea5e9);
+        color: #fff;
+        box-shadow: 0 10px 30px rgba(37, 99, 235, 0.35);
+        animation: splashPulse 2.4s ease-in-out infinite;
+      }
+      @keyframes splashPulse {
+        0%,
+        100% {
+          transform: translateY(0);
+        }
+        50% {
+          transform: translateY(-4px);
+        }
+      }
+      .splash__name {
+        font-size: 1.75rem;
+        font-weight: 800;
+        letter-spacing: -0.02em;
+        color: var(--splash-fg);
+      }
+      .splash__tag {
+        margin-top: -10px;
+        font-size: 0.8rem;
+        color: var(--splash-muted);
+      }
+      .splash__bar {
+        width: 180px;
+        height: 4px;
+        border-radius: 999px;
+        background: color-mix(in srgb, var(--splash-muted) 28%, transparent);
+        overflow: hidden;
+        margin-top: 6px;
+      }
+      .splash__bar > span {
+        display: block;
+        height: 100%;
+        width: 0;
+        border-radius: 999px;
+        background: linear-gradient(90deg, #2563eb, #0ea5e9);
+        animation: splashLoad 5s ease forwards;
+      }
+      @keyframes splashLoad {
+        0% {
+          width: 0;
+        }
+        80% {
+          width: 92%;
+        }
+        100% {
+          width: 100%;
+        }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        .splash__badge,
+        .splash__inner {
+          animation: none;
+        }
+      }
+    </style>
   </head>
   <body>
+    <div id="splash" role="status" aria-label="Cargando Rumbo">
+      <div class="splash__inner">
+        <div class="splash__badge">
+          <svg width="40" height="40" viewBox="0 0 32 32" fill="none" aria-hidden="true">
+            <path d="M16 4 L26 28 L16 22 L6 28 Z" fill="currentColor" />
+            <path d="M16 4 L16 22 L6 28 Z" fill="currentColor" opacity="0.55" />
+          </svg>
+        </div>
+        <div class="splash__name">Rumbo</div>
+        <div class="splash__tag">Gestión de tareas</div>
+        <div class="splash__bar"><span></span></div>
+      </div>
+    </div>
+
     <div id="app"></div>
     <script type="module" src="/src/main.ts"></script>
+
+    <!-- Quita el splash del DOM cuando termina su animación (respaldo por si tarda) -->
+    <script>
+      (function () {
+        var el = document.getElementById('splash');
+        if (!el) return;
+        var remove = function () {
+          if (el && el.parentNode) el.parentNode.removeChild(el);
+        };
+        el.addEventListener('animationend', function (e) {
+          if (e.animationName === 'splashOut') remove();
+        });
+        setTimeout(remove, 6000);
+      })();
+    </script>
   </body>
 </html>

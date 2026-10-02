@@ -1,5 +1,11 @@
 import { createRouter, createWebHistory } from 'vue-router';
 import { useAuthStore } from '@/stores/auth';
+// Importación estática (no diferida): con `<transition mode="out-in">` los
+// componentes de ruta asíncronos dejaban la vista en blanco al navegar en el
+// cliente y obligaban a refrescar. Son pocas vistas, así que se cargan directo.
+import AnalyticsView from '@/views/AnalyticsView.vue';
+import DashboardView from '@/views/DashboardView.vue';
+import LoginView from '@/views/LoginView.vue';
 
 declare module 'vue-router' {
   interface RouteMeta {
@@ -14,19 +20,19 @@ const router = createRouter({
     {
       path: '/login',
       name: 'login',
-      component: () => import('@/views/LoginView.vue'),
+      component: LoginView,
       meta: { guestOnly: true },
     },
     {
       path: '/',
       name: 'dashboard',
-      component: () => import('@/views/DashboardView.vue'),
+      component: DashboardView,
       meta: { requiresAuth: true },
     },
     {
       path: '/analisis',
       name: 'analytics',
-      component: () => import('@/views/AnalyticsView.vue'),
+      component: AnalyticsView,
       meta: { requiresAuth: true },
     },
     { path: '/:pathMatch(.*)*', redirect: '/' },

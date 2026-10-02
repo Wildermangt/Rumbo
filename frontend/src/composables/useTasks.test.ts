@@ -14,6 +14,10 @@ const mockTask = (over: Partial<Task> = {}): Task => ({
   title: 'Demo',
   description: null,
   status: 'PENDING',
+  priority: 'MEDIUM',
+  category: null,
+  dueDate: null,
+  recurrence: 'NONE',
   createdAt: '2026-09-01T10:00:00Z',
   completedAt: null,
   ...over,
@@ -98,8 +102,8 @@ describe('useTasks', () => {
     const { createTask, pagination, setPage } = useTasks();
     await setPage(2, 10);
     createMock.mockResolvedValue(mockTask({ id: 99, title: 'Nueva' }));
-    await createTask({ title: 'Nueva' });
+    await createTask({ title: 'Nueva', priority: 'MEDIUM', recurrence: 'NONE' });
     expect(pagination.page).toBe(1);
-    expect(createMock).toHaveBeenCalledWith({ title: 'Nueva' });
+    expect(createMock).toHaveBeenCalledWith({ title: 'Nueva', priority: 'MEDIUM', recurrence: 'NONE' });
   });
 });
