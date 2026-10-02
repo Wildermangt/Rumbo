@@ -39,22 +39,69 @@ BEGIN
         Title       NVARCHAR(150)      NOT NULL,
         Description NVARCHAR(MAX)      NULL,
         Status      NVARCHAR(20)       NOT NULL CONSTRAINT DF_Tasks_Status    DEFAULT (N'PENDING'),
+        Priority    NVARCHAR(10)       NOT NULL CONSTRAINT DF_Tasks_Priority  DEFAULT (N'MEDIUM'),
+        Category    NVARCHAR(50)       NULL,
+        DueDate     DATE               NULL,
+        Recurrence  NVARCHAR(10)       NOT NULL CONSTRAINT DF_Tasks_Recurrence DEFAULT (N'NONE'),
         CreatedAt   DATETIME2          NOT NULL CONSTRAINT DF_Tasks_CreatedAt DEFAULT (GETDATE()),
         CompletedAt DATETIME2          NULL,
 
         CONSTRAINT PK_Tasks               PRIMARY KEY CLUSTERED (Id),
         CONSTRAINT CK_Tasks_Status        CHECK (Status IN (N'PENDING', N'COMPLETED')),
+        CONSTRAINT CK_Tasks_Priority      CHECK (Priority IN (N'LOW', N'MEDIUM', N'HIGH')),
+        CONSTRAINT CK_Tasks_Recurrence    CHECK (Recurrence IN (N'NONE', N'DAILY', N'WEEKLY', N'MONTHLY')),
         CONSTRAINT CK_Tasks_Title_NotBlank CHECK (LEN(LTRIM(RTRIM(Title))) > 0)
     );
 END
 GO
 
--- Migración idempotente: añade CompletedAt a tablas ya existentes (volúmenes previos).
-IF COL_LENGTH(N'dbo.Tasks', N'CompletedAt') IS NULL
+-- Tabla de adjuntos (archivos subidos, un registro por archivo).
+IF OBJECT_ID(N'dbo.TaskAttachments', N'U') IS NULL
 BEGIN
-    PRINT N'Añadiendo columna CompletedAt...';
-    ALTER TABLE dbo.Tasks ADD CompletedAt DATETIME2 NULL;
+    CREATE TABLE dbo.TaskAttachments
+    (
+        Id           INT IDENTITY(1,1) NOT NULL CONSTRAINT PK_TaskAttachments PRIMARY KEY CLUSTERED,
+        TaskId       INT               NOT NULL,
+        StoredName   NVARCHAR(200)     NOT NULL,  -- nombre único en disco
+        OriginalName NVARCHAR(260)     NOT NULL,  -- nombre original mostrado al usuario
+        Size         BIGINT            NOT NULL,
+        MimeType     NVARCHAR(150)     NULL,
+        CreatedAt    DATETIME2         NOT NULL CONSTRAINT DF_TaskAttachments_CreatedAt DEFAULT (GETDATE()),
+        CONSTRAINT FK_TaskAttachments_Tasks FOREIGN KEY (TaskId) REFERENCES dbo.Tasks(Id) ON DELETE CASCADE
+    );
+    CREATE NONCLUSTERED INDEX IX_TaskAttachments_TaskId ON dbo.TaskAttachments (TaskId);
 END
+GO
+
+-- Migraciones idempotentes (para volúmenes de versiones anteriores).
+IF COL_LENGTH(N'dbo.Tasks', N'CompletedAt') IS NULL
+    ALTER TABLE dbo.Tasks ADD CompletedAt DATETIME2 NULL;
+GO
+IF COL_LENGTH(N'dbo.Tasks', N'Priority') IS NULL
+    ALTER TABLE dbo.Tasks ADD Priority NVARCHAR(10) NOT NULL CONSTRAINT DF_Tasks_Priority DEFAULT (N'MEDIUM');
+GO
+IF COL_LENGTH(N'dbo.Tasks', N'Category') IS NULL
+    ALTER TABLE dbo.Tasks ADD Category NVARCHAR(50) NULL;
+GO
+IF COL_LENGTH(N'dbo.Tasks', N'DueDate') IS NULL
+    ALTER TABLE dbo.Tasks ADD DueDate DATE NULL;
+GO
+IF COL_LENGTH(N'dbo.Tasks', N'Recurrence') IS NULL
+    ALTER TABLE dbo.Tasks ADD Recurrence NVARCHAR(10) NOT NULL CONSTRAINT DF_Tasks_Recurrence DEFAULT (N'NONE');
+GO
+IF NOT EXISTS (SELECT 1 FROM sys.check_constraints WHERE name = N'CK_Tasks_Recurrence')
+    ALTER TABLE dbo.Tasks ADD CONSTRAINT CK_Tasks_Recurrence CHECK (Recurrence IN (N'NONE', N'DAILY', N'WEEKLY', N'MONTHLY'));
+GO
+IF NOT EXISTS (SELECT 1 FROM sys.check_constraints WHERE name = N'CK_Tasks_Priority')
+    ALTER TABLE dbo.Tasks ADD CONSTRAINT CK_Tasks_Priority CHECK (Priority IN (N'LOW', N'MEDIUM', N'HIGH'));
+GO
+-- Índice para notificaciones (tareas pendientes con vencimiento).
+-- Un índice filtrado exige estas SET options activas al crearlo.
+SET QUOTED_IDENTIFIER ON;
+SET ANSI_NULLS ON;
+GO
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'IX_Tasks_Due' AND object_id = OBJECT_ID(N'dbo.Tasks'))
+    CREATE NONCLUSTERED INDEX IX_Tasks_Due ON dbo.Tasks (DueDate) INCLUDE (Title, Priority, Status) WHERE Status = N'PENDING';
 GO
 
 /* ---------------------------------------------------------------------------
@@ -92,6 +139,22 @@ BEGIN
 END
 GO
 
+/* Filtro por categoría (función de la UI). Sin este índice el filtro hace un
+   scan completo de la tabla. Con Category como clave y (CreatedAt, Id) a
+   continuación, el filtro por categoría resuelve con Index Seek y ya ordenado
+   por fecha; INCLUDE (Title) lo hace cubridor para el listado. */
+IF NOT EXISTS (SELECT 1
+               FROM sys.indexes
+               WHERE name = N'IX_Tasks_Category_CreatedAt'
+                 AND object_id = OBJECT_ID(N'dbo.Tasks'))
+BEGIN
+    PRINT N'Creando índice IX_Tasks_Category_CreatedAt...';
+    CREATE NONCLUSTERED INDEX IX_Tasks_Category_CreatedAt
+        ON dbo.Tasks (Category, CreatedAt DESC, Id DESC)
+        INCLUDE (Title);
+END
+GO
+
 /* ---------------------------------------------------------------------------
    4. Stored Procedures
       Códigos de error de negocio (mapeados a HTTP por el backend):
@@ -111,7 +174,9 @@ CREATE OR ALTER PROCEDURE dbo.sp_GetTasks
     @SortDir    NVARCHAR(4)   = N'DESC',
     @FromDate   DATETIME2     = NULL,   -- filtra por CreatedAt >= @FromDate
     @ToDate     DATETIME2     = NULL,   -- filtra por CreatedAt <= fin del día @ToDate
-    @SortBy     NVARCHAR(10)  = N'date' -- criterio de orden: date | title
+    @SortBy     NVARCHAR(10)  = N'date', -- criterio de orden: date | title | due | priority
+    @Priority   NVARCHAR(10)  = NULL,   -- filtra por prioridad
+    @Category   NVARCHAR(50)  = NULL    -- filtra por categoría
 AS
 BEGIN
     SET NOCOUNT ON;
@@ -132,8 +197,13 @@ BEGIN
             THROW 50400, N'SortDir inválido. Valores permitidos: ASC, DESC.', 1;
 
         SET @SortBy = LOWER(LTRIM(RTRIM(ISNULL(@SortBy, N'date'))));
-        IF @SortBy NOT IN (N'date', N'title')
-            THROW 50400, N'SortBy inválido. Valores permitidos: date, title.', 1;
+        IF @SortBy NOT IN (N'date', N'title', N'due', N'priority')
+            THROW 50400, N'SortBy inválido. Valores permitidos: date, title, due, priority.', 1;
+
+        SET @Priority = NULLIF(UPPER(LTRIM(RTRIM(@Priority))), N'');
+        IF @Priority IS NOT NULL AND @Priority NOT IN (N'LOW', N'MEDIUM', N'HIGH')
+            THROW 50400, N'Priority inválido. Valores permitidos: LOW, MEDIUM, HIGH.', 1;
+        SET @Category = NULLIF(LTRIM(RTRIM(@Category)), N'');
 
         IF @FromDate IS NOT NULL AND @ToDate IS NOT NULL AND @FromDate > @ToDate
             THROW 50400, N'El rango de fechas es inválido: la fecha inicial supera la final.', 1;
@@ -157,20 +227,32 @@ BEGIN
               AND (@Like IS NULL OR Title LIKE @Like OR Description LIKE @Like)
               AND (@FromDate IS NULL OR CreatedAt >= @FromDate)
               AND (@ToExclusive IS NULL OR CreatedAt < @ToExclusive)
+              AND (@Priority IS NULL OR Priority = @Priority)
+              AND (@Category IS NULL OR Category = @Category)
             OPTION (RECOMPILE);
 
-            SELECT Id, Title, Description, Status, CreatedAt, CompletedAt
+            SELECT Id, Title, Description, Status, Priority, Category, DueDate, Recurrence, CreatedAt, CompletedAt
             FROM dbo.Tasks
             WHERE (@Status IS NULL OR Status = @Status)
               AND (@Like IS NULL OR Title LIKE @Like OR Description LIKE @Like)
               AND (@FromDate IS NULL OR CreatedAt >= @FromDate)
               AND (@ToExclusive IS NULL OR CreatedAt < @ToExclusive)
+              AND (@Priority IS NULL OR Priority = @Priority)
+              AND (@Category IS NULL OR Category = @Category)
             ORDER BY
                 CASE WHEN @SortBy = N'title' AND @SortDir = N'ASC'  THEN Title END ASC,
                 CASE WHEN @SortBy = N'title' AND @SortDir = N'DESC' THEN Title END DESC,
+                -- Vencimiento: los NULL (sin fecha) van al final en ambos sentidos.
+                CASE WHEN @SortBy = N'due' THEN CASE WHEN DueDate IS NULL THEN 1 ELSE 0 END END ASC,
+                CASE WHEN @SortBy = N'due' AND @SortDir = N'ASC'  THEN DueDate END ASC,
+                CASE WHEN @SortBy = N'due' AND @SortDir = N'DESC' THEN DueDate END DESC,
+                -- Prioridad: mayor a menor (DESC) o menor a mayor (ASC).
+                CASE WHEN @SortBy = N'priority' AND @SortDir = N'DESC'
+                     THEN CASE Priority WHEN N'HIGH' THEN 3 WHEN N'MEDIUM' THEN 2 ELSE 1 END END DESC,
+                CASE WHEN @SortBy = N'priority' AND @SortDir = N'ASC'
+                     THEN CASE Priority WHEN N'HIGH' THEN 3 WHEN N'MEDIUM' THEN 2 ELSE 1 END END ASC,
                 CASE WHEN @SortBy = N'date'  AND @SortDir = N'ASC'  THEN CreatedAt END ASC,
                 CASE WHEN @SortBy = N'date'  AND @SortDir = N'DESC' THEN CreatedAt END DESC,
-                -- El desempate sigue la dirección: así el índice sirve ASC con un recorrido BACKWARD.
                 CASE WHEN @SortDir = N'ASC'  THEN Id END ASC,
                 CASE WHEN @SortDir = N'DESC' THEN Id END DESC
             OFFSET (@PageNumber - 1) * @PageSize ROWS
@@ -189,7 +271,11 @@ GO
 /* sp_CreateTask: inserta y devuelve el registro creado */
 CREATE OR ALTER PROCEDURE dbo.sp_CreateTask
     @Title       NVARCHAR(4000),   -- más amplio que la columna para detectar truncamiento
-    @Description NVARCHAR(MAX) = NULL
+    @Description NVARCHAR(MAX) = NULL,
+    @Priority    NVARCHAR(10)  = N'MEDIUM',
+    @Category    NVARCHAR(50)  = NULL,
+    @DueDate     DATE          = NULL,
+    @Recurrence  NVARCHAR(10)  = N'NONE'
 AS
 BEGIN
     SET NOCOUNT ON;
@@ -197,33 +283,32 @@ BEGIN
 
     BEGIN TRY
         SET @Title = LTRIM(RTRIM(@Title));
-
         IF @Title IS NULL OR LEN(@Title) = 0
             THROW 50400, N'Title es obligatorio.', 1;
-
         IF LEN(@Title) > 150
             THROW 50400, N'Title no puede superar 150 caracteres.', 1;
 
-        DECLARE @Inserted TABLE
-        (
-            Id          INT,
-            Title       NVARCHAR(150),
-            Description NVARCHAR(MAX),
-            Status      NVARCHAR(20),
-            CreatedAt   DATETIME2,
-            CompletedAt DATETIME2
-        );
+        SET @Priority = NULLIF(UPPER(LTRIM(RTRIM(@Priority))), N'');
+        IF @Priority IS NULL SET @Priority = N'MEDIUM';
+        IF @Priority NOT IN (N'LOW', N'MEDIUM', N'HIGH')
+            THROW 50400, N'Priority inválido. Valores permitidos: LOW, MEDIUM, HIGH.', 1;
+
+        SET @Recurrence = NULLIF(UPPER(LTRIM(RTRIM(@Recurrence))), N'');
+        IF @Recurrence IS NULL SET @Recurrence = N'NONE';
+        IF @Recurrence NOT IN (N'NONE', N'DAILY', N'WEEKLY', N'MONTHLY')
+            THROW 50400, N'Recurrence inválido. Valores permitidos: NONE, DAILY, WEEKLY, MONTHLY.', 1;
+
+        DECLARE @NewId INT;
 
         BEGIN TRANSACTION;
-
-            INSERT INTO dbo.Tasks (Title, Description)
-            OUTPUT INSERTED.Id, INSERTED.Title, INSERTED.Description, INSERTED.Status, INSERTED.CreatedAt, INSERTED.CompletedAt
-                INTO @Inserted
-            VALUES (@Title, NULLIF(LTRIM(RTRIM(@Description)), N''));
-
+            INSERT INTO dbo.Tasks (Title, Description, Priority, Category, DueDate, Recurrence)
+            VALUES (@Title, NULLIF(LTRIM(RTRIM(@Description)), N''), @Priority,
+                    NULLIF(LTRIM(RTRIM(@Category)), N''), @DueDate, @Recurrence);
+            SET @NewId = SCOPE_IDENTITY();
         COMMIT TRANSACTION;
 
-        SELECT Id, Title, Description, Status, CreatedAt, CompletedAt FROM @Inserted;
+        SELECT Id, Title, Description, Status, Priority, Category, DueDate, Recurrence, CreatedAt, CompletedAt
+        FROM dbo.Tasks WHERE Id = @NewId;
     END TRY
     BEGIN CATCH
         IF @@TRANCOUNT > 0 ROLLBACK TRANSACTION;
@@ -248,36 +333,340 @@ BEGIN
         IF @Status IS NULL OR @Status NOT IN (N'PENDING', N'COMPLETED')
             THROW 50400, N'Status inválido. Valores permitidos: PENDING, COMPLETED.', 1;
 
-        DECLARE @Updated TABLE
-        (
-            Id          INT,
-            Title       NVARCHAR(150),
-            Description NVARCHAR(MAX),
-            Status      NVARCHAR(20),
-            CreatedAt   DATETIME2,
-            CompletedAt DATETIME2
-        );
-
         BEGIN TRANSACTION;
 
             -- UPDLOCK + HOLDLOCK: la fila no puede desaparecer entre la validación y el UPDATE.
             IF NOT EXISTS (SELECT 1 FROM dbo.Tasks WITH (UPDLOCK, HOLDLOCK) WHERE Id = @TaskId)
                 THROW 50404, N'La tarea solicitada no existe.', 1;
 
+            -- Datos actuales (para la recurrencia).
+            DECLARE @Rec NVARCHAR(10), @OldDue DATE, @T NVARCHAR(150), @D NVARCHAR(MAX),
+                    @P NVARCHAR(10), @C NVARCHAR(50);
+            SELECT @Rec = Recurrence, @OldDue = DueDate, @T = Title, @D = Description,
+                   @P = Priority, @C = Category
+            FROM dbo.Tasks WHERE Id = @TaskId;
+
             -- Al completar se sella la fecha de culminación; al reabrir se limpia.
             UPDATE dbo.Tasks
                SET Status = @Status,
                    CompletedAt = CASE WHEN @Status = N'COMPLETED' THEN GETDATE() ELSE NULL END
-            OUTPUT INSERTED.Id, INSERTED.Title, INSERTED.Description, INSERTED.Status, INSERTED.CreatedAt, INSERTED.CompletedAt
-                INTO @Updated
+             WHERE Id = @TaskId;
+
+            -- Recurrencia: al completar una tarea que se repite, se crea la siguiente ocurrencia.
+            IF @Status = N'COMPLETED' AND @Rec IS NOT NULL AND @Rec <> N'NONE'
+            BEGIN
+                DECLARE @Base DATE = ISNULL(@OldDue, CAST(GETDATE() AS DATE));
+                DECLARE @NextDue DATE =
+                    CASE @Rec
+                        WHEN N'DAILY'   THEN DATEADD(DAY, 1, @Base)
+                        WHEN N'WEEKLY'  THEN DATEADD(WEEK, 1, @Base)
+                        WHEN N'MONTHLY' THEN DATEADD(MONTH, 1, @Base)
+                    END;
+                INSERT INTO dbo.Tasks (Title, Description, Priority, Category, DueDate, Recurrence)
+                VALUES (@T, @D, @P, @C, @NextDue, @Rec);
+            END
+
+        COMMIT TRANSACTION;
+
+        SELECT Id, Title, Description, Status, Priority, Category, DueDate, Recurrence, CreatedAt, CompletedAt
+        FROM dbo.Tasks WHERE Id = @TaskId;
+    END TRY
+    BEGIN CATCH
+        IF @@TRANCOUNT > 0 ROLLBACK TRANSACTION;
+        THROW;
+    END CATCH
+END
+GO
+
+/* sp_UpdateTask: edita título, descripción, prioridad, categoría y vencimiento (CRUD - Update). */
+CREATE OR ALTER PROCEDURE dbo.sp_UpdateTask
+    @TaskId      INT,
+    @Title       NVARCHAR(4000),
+    @Description NVARCHAR(MAX) = NULL,
+    @Priority    NVARCHAR(10)  = N'MEDIUM',
+    @Category    NVARCHAR(50)  = NULL,
+    @DueDate     DATE          = NULL,
+    @Recurrence  NVARCHAR(10)  = N'NONE'
+AS
+BEGIN
+    SET NOCOUNT ON;
+    SET XACT_ABORT ON;
+
+    BEGIN TRY
+        IF @TaskId IS NULL OR @TaskId < 1
+            THROW 50400, N'TaskId inválido.', 1;
+
+        SET @Title = LTRIM(RTRIM(@Title));
+        IF @Title IS NULL OR LEN(@Title) = 0
+            THROW 50400, N'Title es obligatorio.', 1;
+        IF LEN(@Title) > 150
+            THROW 50400, N'Title no puede superar 150 caracteres.', 1;
+
+        SET @Priority = NULLIF(UPPER(LTRIM(RTRIM(@Priority))), N'');
+        IF @Priority IS NULL SET @Priority = N'MEDIUM';
+        IF @Priority NOT IN (N'LOW', N'MEDIUM', N'HIGH')
+            THROW 50400, N'Priority inválido. Valores permitidos: LOW, MEDIUM, HIGH.', 1;
+
+        SET @Recurrence = NULLIF(UPPER(LTRIM(RTRIM(@Recurrence))), N'');
+        IF @Recurrence IS NULL SET @Recurrence = N'NONE';
+        IF @Recurrence NOT IN (N'NONE', N'DAILY', N'WEEKLY', N'MONTHLY')
+            THROW 50400, N'Recurrence inválido. Valores permitidos: NONE, DAILY, WEEKLY, MONTHLY.', 1;
+
+        BEGIN TRANSACTION;
+
+            IF NOT EXISTS (SELECT 1 FROM dbo.Tasks WITH (UPDLOCK, HOLDLOCK) WHERE Id = @TaskId)
+                THROW 50404, N'La tarea solicitada no existe.', 1;
+
+            UPDATE dbo.Tasks
+               SET Title = @Title,
+                   Description = NULLIF(LTRIM(RTRIM(@Description)), N''),
+                   Priority = @Priority,
+                   Category = NULLIF(LTRIM(RTRIM(@Category)), N''),
+                   DueDate = @DueDate,
+                   Recurrence = @Recurrence
              WHERE Id = @TaskId;
 
         COMMIT TRANSACTION;
 
-        SELECT Id, Title, Description, Status, CreatedAt, CompletedAt FROM @Updated;
+        SELECT Id, Title, Description, Status, Priority, Category, DueDate, Recurrence, CreatedAt, CompletedAt
+        FROM dbo.Tasks WHERE Id = @TaskId;
     END TRY
     BEGIN CATCH
         IF @@TRANCOUNT > 0 ROLLBACK TRANSACTION;
+        THROW;
+    END CATCH
+END
+GO
+
+/* sp_DeleteTask: elimina una tarea (CRUD - Delete). Valida existencia. */
+CREATE OR ALTER PROCEDURE dbo.sp_DeleteTask
+    @TaskId INT
+AS
+BEGIN
+    SET NOCOUNT ON;
+    SET XACT_ABORT ON;
+
+    BEGIN TRY
+        IF @TaskId IS NULL OR @TaskId < 1
+            THROW 50400, N'TaskId inválido.', 1;
+
+        BEGIN TRANSACTION;
+
+            IF NOT EXISTS (SELECT 1 FROM dbo.Tasks WITH (UPDLOCK, HOLDLOCK) WHERE Id = @TaskId)
+                THROW 50404, N'La tarea solicitada no existe.', 1;
+
+            DELETE FROM dbo.Tasks WHERE Id = @TaskId;
+
+        COMMIT TRANSACTION;
+
+        SELECT @TaskId AS DeletedId;
+    END TRY
+    BEGIN CATCH
+        IF @@TRANCOUNT > 0 ROLLBACK TRANSACTION;
+        THROW;
+    END CATCH
+END
+GO
+
+/* sp_BulkUpdateStatus: cambia el estado de varias tareas a la vez (selección múltiple).
+   @Ids: arreglo JSON de enteros, p. ej. '[1,2,3]'. Devuelve la cantidad afectada. */
+CREATE OR ALTER PROCEDURE dbo.sp_BulkUpdateStatus
+    @Ids    NVARCHAR(MAX),
+    @Status NVARCHAR(20)
+AS
+BEGIN
+    SET NOCOUNT ON;
+    SET XACT_ABORT ON;
+
+    BEGIN TRY
+        IF @Status IS NULL OR @Status NOT IN (N'PENDING', N'COMPLETED')
+            THROW 50400, N'Status inválido. Valores permitidos: PENDING, COMPLETED.', 1;
+
+        DECLARE @List TABLE (Id INT PRIMARY KEY);
+        INSERT INTO @List (Id)
+        SELECT DISTINCT TRY_CAST(value AS INT)
+        FROM OPENJSON(@Ids)
+        WHERE TRY_CAST(value AS INT) IS NOT NULL;
+
+        IF NOT EXISTS (SELECT 1 FROM @List)
+            THROW 50400, N'Debe indicar al menos un identificador válido.', 1;
+
+        DECLARE @Affected INT;
+        BEGIN TRANSACTION;
+            UPDATE t
+               SET t.Status = @Status,
+                   t.CompletedAt = CASE WHEN @Status = N'COMPLETED' THEN GETDATE() ELSE NULL END
+            FROM dbo.Tasks t
+            JOIN @List l ON l.Id = t.Id;
+            -- @@ROWCOUNT debe leerse antes del COMMIT (el COMMIT lo reinicia a 0).
+            SET @Affected = @@ROWCOUNT;
+        COMMIT TRANSACTION;
+
+        SELECT @Affected AS Affected;
+    END TRY
+    BEGIN CATCH
+        IF @@TRANCOUNT > 0 ROLLBACK TRANSACTION;
+        THROW;
+    END CATCH
+END
+GO
+
+/* sp_BulkDeleteTasks: elimina varias tareas (selección múltiple). */
+CREATE OR ALTER PROCEDURE dbo.sp_BulkDeleteTasks
+    @Ids NVARCHAR(MAX)
+AS
+BEGIN
+    SET NOCOUNT ON;
+    SET XACT_ABORT ON;
+
+    BEGIN TRY
+        DECLARE @List TABLE (Id INT PRIMARY KEY);
+        INSERT INTO @List (Id)
+        SELECT DISTINCT TRY_CAST(value AS INT)
+        FROM OPENJSON(@Ids)
+        WHERE TRY_CAST(value AS INT) IS NOT NULL;
+
+        IF NOT EXISTS (SELECT 1 FROM @List)
+            THROW 50400, N'Debe indicar al menos un identificador válido.', 1;
+
+        DECLARE @Affected INT;
+        BEGIN TRANSACTION;
+            DELETE t FROM dbo.Tasks t JOIN @List l ON l.Id = t.Id;
+            -- @@ROWCOUNT debe leerse antes del COMMIT (el COMMIT lo reinicia a 0).
+            SET @Affected = @@ROWCOUNT;
+        COMMIT TRANSACTION;
+
+        SELECT @Affected AS Affected;
+    END TRY
+    BEGIN CATCH
+        IF @@TRANCOUNT > 0 ROLLBACK TRANSACTION;
+        THROW;
+    END CATCH
+END
+GO
+
+/* ---------------------------------------------------------------------------
+   Adjuntos y calendario
+   --------------------------------------------------------------------------- */
+
+/* sp_AddAttachment: registra un archivo subido para una tarea. */
+CREATE OR ALTER PROCEDURE dbo.sp_AddAttachment
+    @TaskId       INT,
+    @StoredName   NVARCHAR(200),
+    @OriginalName NVARCHAR(260),
+    @Size         BIGINT,
+    @MimeType     NVARCHAR(150) = NULL
+AS
+BEGIN
+    SET NOCOUNT ON;
+    SET XACT_ABORT ON;
+    BEGIN TRY
+        IF NOT EXISTS (SELECT 1 FROM dbo.Tasks WHERE Id = @TaskId)
+            THROW 50404, N'La tarea solicitada no existe.', 1;
+
+        DECLARE @NewId INT;
+        INSERT INTO dbo.TaskAttachments (TaskId, StoredName, OriginalName, Size, MimeType)
+        VALUES (@TaskId, @StoredName, @OriginalName, @Size, @MimeType);
+        SET @NewId = SCOPE_IDENTITY();
+
+        SELECT Id, TaskId, StoredName, OriginalName, Size, MimeType, CreatedAt
+        FROM dbo.TaskAttachments WHERE Id = @NewId;
+    END TRY
+    BEGIN CATCH
+        THROW;
+    END CATCH
+END
+GO
+
+/* sp_GetAttachments: lista los adjuntos de una tarea. */
+CREATE OR ALTER PROCEDURE dbo.sp_GetAttachments
+    @TaskId INT
+AS
+BEGIN
+    SET NOCOUNT ON;
+    SELECT Id, TaskId, StoredName, OriginalName, Size, MimeType, CreatedAt
+    FROM dbo.TaskAttachments
+    WHERE TaskId = @TaskId
+    ORDER BY CreatedAt DESC, Id DESC;
+END
+GO
+
+/* sp_GetAttachment: un adjunto por id (para descargar). */
+CREATE OR ALTER PROCEDURE dbo.sp_GetAttachment
+    @Id INT
+AS
+BEGIN
+    SET NOCOUNT ON;
+    SELECT Id, TaskId, StoredName, OriginalName, Size, MimeType, CreatedAt
+    FROM dbo.TaskAttachments WHERE Id = @Id;
+END
+GO
+
+/* sp_DeleteAttachment: elimina el registro y devuelve el nombre en disco para borrar el archivo. */
+CREATE OR ALTER PROCEDURE dbo.sp_DeleteAttachment
+    @Id INT
+AS
+BEGIN
+    SET NOCOUNT ON;
+    SET XACT_ABORT ON;
+    BEGIN TRY
+        DECLARE @Stored NVARCHAR(200);
+        SELECT @Stored = StoredName FROM dbo.TaskAttachments WHERE Id = @Id;
+        IF @Stored IS NULL THROW 50404, N'El adjunto solicitado no existe.', 1;
+        DELETE FROM dbo.TaskAttachments WHERE Id = @Id;
+        SELECT @Stored AS StoredName;
+    END TRY
+    BEGIN CATCH
+        THROW;
+    END CATCH
+END
+GO
+
+/* sp_GetDueTasks: tareas PENDIENTES con fecha de vencimiento (para el feed de calendario .ics). */
+CREATE OR ALTER PROCEDURE dbo.sp_GetDueTasks
+AS
+BEGIN
+    SET NOCOUNT ON;
+    SELECT Id, Title, Description, Priority, Category, DueDate
+    FROM dbo.Tasks
+    WHERE Status = N'PENDING' AND DueDate IS NOT NULL
+    ORDER BY DueDate ASC, Id ASC;
+END
+GO
+
+/* sp_GetNotifications: tareas PENDIENTES vencidas o próximas a vencer.
+   @Days: ventana de "por vencer" en días (por defecto 3).
+   Devuelve 2 result sets:
+     [0] Contadores (Overdue, DueSoon)
+     [1] Lista (hasta @Top) ordenada por vencimiento ascendente. */
+CREATE OR ALTER PROCEDURE dbo.sp_GetNotifications
+    @Days INT = 3,
+    @Top  INT = 20
+AS
+BEGIN
+    SET NOCOUNT ON;
+    SET XACT_ABORT ON;
+
+    BEGIN TRY
+        IF @Days IS NULL OR @Days < 0 SET @Days = 3;
+        IF @Top IS NULL OR @Top < 1 OR @Top > 100 SET @Top = 20;
+
+        DECLARE @Today DATE = CAST(GETDATE() AS DATE);
+        DECLARE @Limit DATE = DATEADD(DAY, @Days, @Today);
+
+        SELECT
+            SUM(CASE WHEN DueDate < @Today THEN 1 ELSE 0 END)                          AS Overdue,
+            SUM(CASE WHEN DueDate >= @Today AND DueDate <= @Limit THEN 1 ELSE 0 END)   AS DueSoon
+        FROM dbo.Tasks
+        WHERE Status = N'PENDING' AND DueDate IS NOT NULL;
+
+        SELECT TOP (@Top) Id, Title, Priority, Category, DueDate,
+               CASE WHEN DueDate < @Today THEN N'OVERDUE' ELSE N'DUE_SOON' END AS Kind
+        FROM dbo.Tasks
+        WHERE Status = N'PENDING' AND DueDate IS NOT NULL AND DueDate <= @Limit
+        ORDER BY DueDate ASC, Id ASC;
+    END TRY
+    BEGIN CATCH
         THROW;
     END CATCH
 END
@@ -291,7 +680,9 @@ GO
      [2] Completadas por bucket (Bucket DATE, Cnt INT)
    El relleno de buckets vacíos y el formato de etiquetas los hace el backend. */
 CREATE OR ALTER PROCEDURE dbo.sp_GetTaskStats
-    @Granularity NVARCHAR(10) = N'month'
+    @Granularity NVARCHAR(10) = N'month',  -- unidad del bucket: day | week | month | year
+    @FromDate    DATE         = NULL,       -- acota el análisis a un periodo (inclusive)
+    @ToDate      DATE         = NULL        -- fin del periodo (inclusive)
 AS
 BEGIN
     SET NOCOUNT ON;
@@ -299,44 +690,58 @@ BEGIN
 
     BEGIN TRY
         SET @Granularity = LOWER(LTRIM(RTRIM(ISNULL(@Granularity, N'month'))));
-        IF @Granularity NOT IN (N'week', N'month', N'year')
-            THROW 50400, N'Granularity inválido. Valores permitidos: week, month, year.', 1;
+        IF @Granularity NOT IN (N'day', N'week', N'month', N'year')
+            THROW 50400, N'Granularity inválido. Valores permitidos: day, week, month, year.', 1;
+
+        IF @FromDate IS NOT NULL AND @ToDate IS NOT NULL AND @FromDate > @ToDate
+            THROW 50400, N'El rango de fechas es inválido: la fecha inicial supera la final.', 1;
+
+        -- @ToDate es inclusivo: se cubre hasta el final de ese día.
+        DECLARE @ToExclusive DATETIME2 = CASE WHEN @ToDate IS NOT NULL THEN DATEADD(DAY, 1, @ToDate) END;
 
         SET TRANSACTION ISOLATION LEVEL READ COMMITTED;
 
-        -- [0] Totales + tiempo medio de culminación (en horas).
+        -- [0] Totales + tiempo medio de culminación (en horas), acotados al periodo si se indica.
+        --     El periodo se aplica sobre la fecha de creación (cohorte creada en el periodo).
         SELECT
             COUNT_BIG(*)                                                     AS Total,
             SUM(CASE WHEN Status = N'PENDING'   THEN 1 ELSE 0 END)           AS Pending,
             SUM(CASE WHEN Status = N'COMPLETED' THEN 1 ELSE 0 END)           AS Completed,
             AVG(CASE WHEN CompletedAt IS NOT NULL
                      THEN DATEDIFF(MINUTE, CreatedAt, CompletedAt) * 1.0 / 60 END) AS AvgCompletionHours
-        FROM dbo.Tasks;
+        FROM dbo.Tasks
+        WHERE (@FromDate    IS NULL OR CreatedAt >= @FromDate)
+          AND (@ToExclusive IS NULL OR CreatedAt <  @ToExclusive);
 
         -- Truncamiento del bucket, independiente de DATEFIRST/idioma:
-        --   week  -> lunes de la semana | month -> día 1 | year -> 1 de enero
+        --   day -> ese día | week -> lunes de la semana | month -> día 1 | year -> 1 de enero
         -- [1] Creadas por bucket
         SELECT
             CAST(
                 CASE @Granularity
+                    WHEN N'day'   THEN CAST(CreatedAt AS DATE)
                     WHEN N'week'  THEN DATEADD(DAY,   -(DATEDIFF(DAY,   0, CreatedAt) % 7), CreatedAt)
                     WHEN N'month' THEN DATEADD(MONTH,  DATEDIFF(MONTH,  0, CreatedAt), 0)
                     ELSE               DATEADD(YEAR,   DATEDIFF(YEAR,   0, CreatedAt), 0)
                 END AS DATE) AS Bucket,
             COUNT_BIG(*)     AS Cnt
         FROM dbo.Tasks
+        WHERE (@FromDate    IS NULL OR CreatedAt >= @FromDate)
+          AND (@ToExclusive IS NULL OR CreatedAt <  @ToExclusive)
         GROUP BY
             CASE @Granularity
+                WHEN N'day'   THEN CAST(CreatedAt AS DATE)
                 WHEN N'week'  THEN DATEADD(DAY,   -(DATEDIFF(DAY,   0, CreatedAt) % 7), CreatedAt)
                 WHEN N'month' THEN DATEADD(MONTH,  DATEDIFF(MONTH,  0, CreatedAt), 0)
                 ELSE               DATEADD(YEAR,   DATEDIFF(YEAR,   0, CreatedAt), 0)
             END
         ORDER BY Bucket;
 
-        -- [2] Completadas por bucket (según la fecha de culminación)
+        -- [2] Completadas por bucket (según la fecha de culminación, dentro del periodo)
         SELECT
             CAST(
                 CASE @Granularity
+                    WHEN N'day'   THEN CAST(CompletedAt AS DATE)
                     WHEN N'week'  THEN DATEADD(DAY,   -(DATEDIFF(DAY,   0, CompletedAt) % 7), CompletedAt)
                     WHEN N'month' THEN DATEADD(MONTH,  DATEDIFF(MONTH,  0, CompletedAt), 0)
                     ELSE               DATEADD(YEAR,   DATEDIFF(YEAR,   0, CompletedAt), 0)
@@ -344,8 +749,11 @@ BEGIN
             COUNT_BIG(*)     AS Cnt
         FROM dbo.Tasks
         WHERE CompletedAt IS NOT NULL
+          AND (@FromDate    IS NULL OR CompletedAt >= @FromDate)
+          AND (@ToExclusive IS NULL OR CompletedAt <  @ToExclusive)
         GROUP BY
             CASE @Granularity
+                WHEN N'day'   THEN CAST(CompletedAt AS DATE)
                 WHEN N'week'  THEN DATEADD(DAY,   -(DATEDIFF(DAY,   0, CompletedAt) % 7), CompletedAt)
                 WHEN N'month' THEN DATEADD(MONTH,  DATEDIFF(MONTH,  0, CompletedAt), 0)
                 ELSE               DATEADD(YEAR,   DATEDIFF(YEAR,   0, CompletedAt), 0)
@@ -453,22 +861,32 @@ BEGIN
     ;WITH T AS (
         SELECT ROW_NUMBER() OVER (ORDER BY (SELECT NULL)) AS n, t, d FROM @Templates
     )
-    INSERT INTO dbo.Tasks (Title, Description, Status, CreatedAt, CompletedAt)
+    INSERT INTO dbo.Tasks (Title, Description, Status, Priority, Category, DueDate, Recurrence, CreatedAt, CompletedAt)
     SELECT
         T.t,
         T.d,
         CASE WHEN c.CompletedAt IS NOT NULL THEN N'COMPLETED' ELSE N'PENDING' END,
+        -- Prioridad: ~25% alta, ~45% media, ~30% baja.
+        CASE WHEN p.r < 25 THEN N'HIGH' WHEN p.r < 70 THEN N'MEDIUM' ELSE N'LOW' END,
+        -- Categoría rotativa de un conjunto realista.
+        CHOOSE((T.n % 7) + 1, N'Trabajo', N'Finanzas', N'Clientes', N'TI', N'Administración', N'Marketing', N'Personal'),
+        -- Vencimiento solo para pendientes: algunas vencidas, otras próximas, otras más lejanas.
+        CASE WHEN c.CompletedAt IS NOT NULL THEN NULL
+             ELSE DATEADD(DAY, (ABS(CHECKSUM(NEWID())) % 30) - 7, CAST(GETDATE() AS DATE)) END,
+        -- Recurrencia: unas pocas se repiten (diaria/semanal/mensual).
+        CASE WHEN c.CompletedAt IS NOT NULL THEN N'NONE'
+             WHEN p.r < 8 THEN N'WEEKLY' WHEN p.r < 14 THEN N'MONTHLY' WHEN p.r < 17 THEN N'DAILY'
+             ELSE N'NONE' END,
         c.CreatedAt,
         c.CompletedAt
     FROM T
+    CROSS APPLY (SELECT r = ABS(CHECKSUM(NEWID())) % 100) AS p
     CROSS APPLY (
-        -- CreatedAt: más atrás cuanto mayor es n (hasta ~12 meses), con dispersión.
         SELECT CreatedAt = DATEADD(HOUR, -(T.n * 160 + (ABS(CHECKSUM(NEWID())) % 150)), GETDATE())
     ) AS c0
     CROSS APPLY (
         SELECT
             CreatedAt = c0.CreatedAt,
-            -- Completadas: probabilidad mayor para las tareas más antiguas.
             CompletedAt = CASE
                 WHEN (ABS(CHECKSUM(NEWID())) % 100) < (45 + T.n)
                 THEN DATEADD(HOUR, (ABS(CHECKSUM(NEWID())) % 150) + 3, c0.CreatedAt)
