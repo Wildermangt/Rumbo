@@ -103,6 +103,15 @@ GO
 IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'IX_Tasks_Due' AND object_id = OBJECT_ID(N'dbo.Tasks'))
     CREATE NONCLUSTERED INDEX IX_Tasks_Due ON dbo.Tasks (DueDate) INCLUDE (Title, Priority, Status) WHERE Status = N'PENDING';
 GO
+-- Recurrencia: cada ocurrencia generada guarda la tarea que la originó. El índice
+-- único filtrado garantiza (incluso con concurrencia) que una tarea genere como
+-- máximo una ocurrencia, aunque se complete, reabra y vuelva a completar.
+IF COL_LENGTH(N'dbo.Tasks', N'SourceTaskId') IS NULL
+    ALTER TABLE dbo.Tasks ADD SourceTaskId INT NULL;
+GO
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'UX_Tasks_SourceTaskId' AND object_id = OBJECT_ID(N'dbo.Tasks'))
+    CREATE UNIQUE NONCLUSTERED INDEX UX_Tasks_SourceTaskId ON dbo.Tasks (SourceTaskId) WHERE SourceTaskId IS NOT NULL;
+GO
 
 /* ---------------------------------------------------------------------------
    3. Índices no agrupados para filtrado + paginación por fecha
@@ -317,7 +326,10 @@ BEGIN
 END
 GO
 
-/* sp_UpdateTaskStatus: valida existencia, actualiza y devuelve el registro */
+/* sp_UpdateTaskStatus: valida existencia, actualiza y devuelve el registro.
+   Idempotente: si la tarea ya tiene ese estado no cambia nada (ni CompletedAt
+   ni la recurrencia). La siguiente ocurrencia solo se crea en la transición
+   PENDING -> COMPLETED y una sola vez por tarea (SourceTaskId). */
 CREATE OR ALTER PROCEDURE dbo.sp_UpdateTaskStatus
     @TaskId INT,
     @Status NVARCHAR(20)
@@ -335,35 +347,39 @@ BEGIN
 
         BEGIN TRANSACTION;
 
-            -- UPDLOCK + HOLDLOCK: la fila no puede desaparecer entre la validación y el UPDATE.
-            IF NOT EXISTS (SELECT 1 FROM dbo.Tasks WITH (UPDLOCK, HOLDLOCK) WHERE Id = @TaskId)
+            -- UPDLOCK + HOLDLOCK: la fila no puede cambiar ni desaparecer entre la lectura y el UPDATE.
+            DECLARE @OldStatus NVARCHAR(20), @Rec NVARCHAR(10), @OldDue DATE, @T NVARCHAR(150),
+                    @D NVARCHAR(MAX), @P NVARCHAR(10), @C NVARCHAR(50);
+            SELECT @OldStatus = Status, @Rec = Recurrence, @OldDue = DueDate, @T = Title,
+                   @D = Description, @P = Priority, @C = Category
+            FROM dbo.Tasks WITH (UPDLOCK, HOLDLOCK) WHERE Id = @TaskId;
+
+            IF @OldStatus IS NULL
                 THROW 50404, N'La tarea solicitada no existe.', 1;
 
-            -- Datos actuales (para la recurrencia).
-            DECLARE @Rec NVARCHAR(10), @OldDue DATE, @T NVARCHAR(150), @D NVARCHAR(MAX),
-                    @P NVARCHAR(10), @C NVARCHAR(50);
-            SELECT @Rec = Recurrence, @OldDue = DueDate, @T = Title, @D = Description,
-                   @P = Priority, @C = Category
-            FROM dbo.Tasks WHERE Id = @TaskId;
-
-            -- Al completar se sella la fecha de culminación; al reabrir se limpia.
-            UPDATE dbo.Tasks
-               SET Status = @Status,
-                   CompletedAt = CASE WHEN @Status = N'COMPLETED' THEN GETDATE() ELSE NULL END
-             WHERE Id = @TaskId;
-
-            -- Recurrencia: al completar una tarea que se repite, se crea la siguiente ocurrencia.
-            IF @Status = N'COMPLETED' AND @Rec IS NOT NULL AND @Rec <> N'NONE'
+            IF @OldStatus <> @Status
             BEGIN
-                DECLARE @Base DATE = ISNULL(@OldDue, CAST(GETDATE() AS DATE));
-                DECLARE @NextDue DATE =
-                    CASE @Rec
-                        WHEN N'DAILY'   THEN DATEADD(DAY, 1, @Base)
-                        WHEN N'WEEKLY'  THEN DATEADD(WEEK, 1, @Base)
-                        WHEN N'MONTHLY' THEN DATEADD(MONTH, 1, @Base)
-                    END;
-                INSERT INTO dbo.Tasks (Title, Description, Priority, Category, DueDate, Recurrence)
-                VALUES (@T, @D, @P, @C, @NextDue, @Rec);
+                -- Al completar se sella la fecha de culminación; al reabrir se limpia.
+                UPDATE dbo.Tasks
+                   SET Status = @Status,
+                       CompletedAt = CASE WHEN @Status = N'COMPLETED' THEN GETDATE() ELSE NULL END
+                 WHERE Id = @TaskId;
+
+                -- Recurrencia: al completar una tarea que se repite se crea la siguiente
+                -- ocurrencia, salvo que ya se hubiera generado antes (reabrir y completar).
+                IF @Status = N'COMPLETED' AND @Rec <> N'NONE'
+                   AND NOT EXISTS (SELECT 1 FROM dbo.Tasks WHERE SourceTaskId = @TaskId)
+                BEGIN
+                    DECLARE @Base DATE = ISNULL(@OldDue, CAST(GETDATE() AS DATE));
+                    DECLARE @NextDue DATE =
+                        CASE @Rec
+                            WHEN N'DAILY'   THEN DATEADD(DAY, 1, @Base)
+                            WHEN N'WEEKLY'  THEN DATEADD(WEEK, 1, @Base)
+                            WHEN N'MONTHLY' THEN DATEADD(MONTH, 1, @Base)
+                        END;
+                    INSERT INTO dbo.Tasks (Title, Description, Priority, Category, DueDate, Recurrence, SourceTaskId)
+                    VALUES (@T, @D, @P, @C, @NextDue, @Rec, @TaskId);
+                END
             END
 
         COMMIT TRANSACTION;
@@ -438,7 +454,9 @@ BEGIN
 END
 GO
 
-/* sp_DeleteTask: elimina una tarea (CRUD - Delete). Valida existencia. */
+/* sp_DeleteTask: elimina una tarea (CRUD - Delete). Valida existencia.
+   Los adjuntos se borran en cascada; StoredNames (JSON) devuelve sus nombres en
+   disco para que el backend elimine también los archivos. */
 CREATE OR ALTER PROCEDURE dbo.sp_DeleteTask
     @TaskId INT
 AS
@@ -450,16 +468,22 @@ BEGIN
         IF @TaskId IS NULL OR @TaskId < 1
             THROW 50400, N'TaskId inválido.', 1;
 
+        DECLARE @Files TABLE (StoredName NVARCHAR(200));
+
         BEGIN TRANSACTION;
 
             IF NOT EXISTS (SELECT 1 FROM dbo.Tasks WITH (UPDLOCK, HOLDLOCK) WHERE Id = @TaskId)
                 THROW 50404, N'La tarea solicitada no existe.', 1;
 
+            INSERT INTO @Files (StoredName)
+            SELECT StoredName FROM dbo.TaskAttachments WHERE TaskId = @TaskId;
+
             DELETE FROM dbo.Tasks WHERE Id = @TaskId;
 
         COMMIT TRANSACTION;
 
-        SELECT @TaskId AS DeletedId;
+        SELECT @TaskId AS DeletedId,
+               (SELECT StoredName FROM @Files FOR JSON PATH) AS StoredNames;
     END TRY
     BEGIN CATCH
         IF @@TRANCOUNT > 0 ROLLBACK TRANSACTION;
@@ -469,7 +493,9 @@ END
 GO
 
 /* sp_BulkUpdateStatus: cambia el estado de varias tareas a la vez (selección múltiple).
-   @Ids: arreglo JSON de enteros, p. ej. '[1,2,3]'. Devuelve la cantidad afectada. */
+   @Ids: arreglo JSON de enteros, p. ej. '[1,2,3]'. Devuelve la cantidad que cambió de estado.
+   Mismas reglas que sp_UpdateTaskStatus: solo toca las filas cuyo estado cambia y
+   genera la siguiente ocurrencia de las recurrentes que pasan a COMPLETED. */
 CREATE OR ALTER PROCEDURE dbo.sp_BulkUpdateStatus
     @Ids    NVARCHAR(MAX),
     @Status NVARCHAR(20)
@@ -493,11 +519,28 @@ BEGIN
 
         DECLARE @Affected INT;
         BEGIN TRANSACTION;
+            -- Recurrencia: se calcula antes del UPDATE, mientras aún se ve el estado anterior.
+            IF @Status = N'COMPLETED'
+                INSERT INTO dbo.Tasks (Title, Description, Priority, Category, DueDate, Recurrence, SourceTaskId)
+                SELECT t.Title, t.Description, t.Priority, t.Category,
+                       CASE t.Recurrence
+                           WHEN N'DAILY'   THEN DATEADD(DAY,   1, ISNULL(t.DueDate, CAST(GETDATE() AS DATE)))
+                           WHEN N'WEEKLY'  THEN DATEADD(WEEK,  1, ISNULL(t.DueDate, CAST(GETDATE() AS DATE)))
+                           WHEN N'MONTHLY' THEN DATEADD(MONTH, 1, ISNULL(t.DueDate, CAST(GETDATE() AS DATE)))
+                       END,
+                       t.Recurrence, t.Id
+                FROM dbo.Tasks t WITH (UPDLOCK, HOLDLOCK)
+                JOIN @List l ON l.Id = t.Id
+                WHERE t.Status = N'PENDING'
+                  AND t.Recurrence <> N'NONE'
+                  AND NOT EXISTS (SELECT 1 FROM dbo.Tasks s WHERE s.SourceTaskId = t.Id);
+
             UPDATE t
                SET t.Status = @Status,
                    t.CompletedAt = CASE WHEN @Status = N'COMPLETED' THEN GETDATE() ELSE NULL END
             FROM dbo.Tasks t
-            JOIN @List l ON l.Id = t.Id;
+            JOIN @List l ON l.Id = t.Id
+            WHERE t.Status <> @Status;
             -- @@ROWCOUNT debe leerse antes del COMMIT (el COMMIT lo reinicia a 0).
             SET @Affected = @@ROWCOUNT;
         COMMIT TRANSACTION;
@@ -511,7 +554,8 @@ BEGIN
 END
 GO
 
-/* sp_BulkDeleteTasks: elimina varias tareas (selección múltiple). */
+/* sp_BulkDeleteTasks: elimina varias tareas (selección múltiple).
+   Devuelve Affected y StoredNames (JSON) con los archivos adjuntos a borrar del disco. */
 CREATE OR ALTER PROCEDURE dbo.sp_BulkDeleteTasks
     @Ids NVARCHAR(MAX)
 AS
@@ -530,13 +574,20 @@ BEGIN
             THROW 50400, N'Debe indicar al menos un identificador válido.', 1;
 
         DECLARE @Affected INT;
+        DECLARE @Files TABLE (StoredName NVARCHAR(200));
         BEGIN TRANSACTION;
+            INSERT INTO @Files (StoredName)
+            SELECT a.StoredName
+            FROM dbo.TaskAttachments a WITH (UPDLOCK, HOLDLOCK)
+            JOIN @List l ON l.Id = a.TaskId;
+
             DELETE t FROM dbo.Tasks t JOIN @List l ON l.Id = t.Id;
             -- @@ROWCOUNT debe leerse antes del COMMIT (el COMMIT lo reinicia a 0).
             SET @Affected = @@ROWCOUNT;
         COMMIT TRANSACTION;
 
-        SELECT @Affected AS Affected;
+        SELECT @Affected AS Affected,
+               (SELECT StoredName FROM @Files FOR JSON PATH) AS StoredNames;
     END TRY
     BEGIN CATCH
         IF @@TRANCOUNT > 0 ROLLBACK TRANSACTION;
@@ -561,16 +612,40 @@ BEGIN
     SET NOCOUNT ON;
     SET XACT_ABORT ON;
     BEGIN TRY
-        IF NOT EXISTS (SELECT 1 FROM dbo.Tasks WHERE Id = @TaskId)
-            THROW 50404, N'La tarea solicitada no existe.', 1;
-
         DECLARE @NewId INT;
-        INSERT INTO dbo.TaskAttachments (TaskId, StoredName, OriginalName, Size, MimeType)
-        VALUES (@TaskId, @StoredName, @OriginalName, @Size, @MimeType);
-        SET @NewId = SCOPE_IDENTITY();
+
+        BEGIN TRANSACTION;
+            -- UPDLOCK: si la tarea se está borrando en paralelo, espera y luego falla con 404.
+            IF NOT EXISTS (SELECT 1 FROM dbo.Tasks WITH (UPDLOCK, HOLDLOCK) WHERE Id = @TaskId)
+                THROW 50404, N'La tarea solicitada no existe.', 1;
+
+            INSERT INTO dbo.TaskAttachments (TaskId, StoredName, OriginalName, Size, MimeType)
+            VALUES (@TaskId, @StoredName, @OriginalName, @Size, @MimeType);
+            SET @NewId = SCOPE_IDENTITY();
+        COMMIT TRANSACTION;
 
         SELECT Id, TaskId, StoredName, OriginalName, Size, MimeType, CreatedAt
         FROM dbo.TaskAttachments WHERE Id = @NewId;
+    END TRY
+    BEGIN CATCH
+        IF @@TRANCOUNT > 0 ROLLBACK TRANSACTION;
+        THROW;
+    END CATCH
+END
+GO
+
+/* sp_GetAttachments: lista los adjuntos de una tarea (lectura: sin transacción). */
+CREATE OR ALTER PROCEDURE dbo.sp_GetAttachments
+    @TaskId INT
+AS
+BEGIN
+    SET NOCOUNT ON;
+    SET XACT_ABORT ON;
+    BEGIN TRY
+        SELECT Id, TaskId, StoredName, OriginalName, Size, MimeType, CreatedAt
+        FROM dbo.TaskAttachments
+        WHERE TaskId = @TaskId
+        ORDER BY CreatedAt DESC, Id DESC;
     END TRY
     BEGIN CATCH
         THROW;
@@ -578,27 +653,20 @@ BEGIN
 END
 GO
 
-/* sp_GetAttachments: lista los adjuntos de una tarea. */
-CREATE OR ALTER PROCEDURE dbo.sp_GetAttachments
-    @TaskId INT
-AS
-BEGIN
-    SET NOCOUNT ON;
-    SELECT Id, TaskId, StoredName, OriginalName, Size, MimeType, CreatedAt
-    FROM dbo.TaskAttachments
-    WHERE TaskId = @TaskId
-    ORDER BY CreatedAt DESC, Id DESC;
-END
-GO
-
-/* sp_GetAttachment: un adjunto por id (para descargar). */
+/* sp_GetAttachment: un adjunto por id (para descargar). Lectura: sin transacción. */
 CREATE OR ALTER PROCEDURE dbo.sp_GetAttachment
     @Id INT
 AS
 BEGIN
     SET NOCOUNT ON;
-    SELECT Id, TaskId, StoredName, OriginalName, Size, MimeType, CreatedAt
-    FROM dbo.TaskAttachments WHERE Id = @Id;
+    SET XACT_ABORT ON;
+    BEGIN TRY
+        SELECT Id, TaskId, StoredName, OriginalName, Size, MimeType, CreatedAt
+        FROM dbo.TaskAttachments WHERE Id = @Id;
+    END TRY
+    BEGIN CATCH
+        THROW;
+    END CATCH
 END
 GO
 
@@ -611,26 +679,36 @@ BEGIN
     SET XACT_ABORT ON;
     BEGIN TRY
         DECLARE @Stored NVARCHAR(200);
-        SELECT @Stored = StoredName FROM dbo.TaskAttachments WHERE Id = @Id;
-        IF @Stored IS NULL THROW 50404, N'El adjunto solicitado no existe.', 1;
-        DELETE FROM dbo.TaskAttachments WHERE Id = @Id;
+        BEGIN TRANSACTION;
+            SELECT @Stored = StoredName FROM dbo.TaskAttachments WITH (UPDLOCK, HOLDLOCK) WHERE Id = @Id;
+            IF @Stored IS NULL THROW 50404, N'El adjunto solicitado no existe.', 1;
+            DELETE FROM dbo.TaskAttachments WHERE Id = @Id;
+        COMMIT TRANSACTION;
         SELECT @Stored AS StoredName;
     END TRY
     BEGIN CATCH
+        IF @@TRANCOUNT > 0 ROLLBACK TRANSACTION;
         THROW;
     END CATCH
 END
 GO
 
-/* sp_GetDueTasks: tareas PENDIENTES con fecha de vencimiento (para el feed de calendario .ics). */
+/* sp_GetDueTasks: tareas PENDIENTES con fecha de vencimiento (para el feed de calendario .ics).
+   Lectura: sin transacción. */
 CREATE OR ALTER PROCEDURE dbo.sp_GetDueTasks
 AS
 BEGIN
     SET NOCOUNT ON;
-    SELECT Id, Title, Description, Priority, Category, DueDate
-    FROM dbo.Tasks
-    WHERE Status = N'PENDING' AND DueDate IS NOT NULL
-    ORDER BY DueDate ASC, Id ASC;
+    SET XACT_ABORT ON;
+    BEGIN TRY
+        SELECT Id, Title, Description, Priority, Category, DueDate
+        FROM dbo.Tasks
+        WHERE Status = N'PENDING' AND DueDate IS NOT NULL
+        ORDER BY DueDate ASC, Id ASC;
+    END TRY
+    BEGIN CATCH
+        THROW;
+    END CATCH
 END
 GO
 

@@ -1,8 +1,0 @@
-$ npm audit   (backend)
-5 vulnerabilities (3 moderate, 1 high, 1 critical)  -> todas en vitest/vite/esbuild (devDependencies)
-$ npm audit --omit=dev   (backend, solo produccion)
-found 0 vulnerabilities
-
-$ npm audit   (frontend)
-2 vulnerabilities (1 moderate, 1 high)  -> vite/esbuild (herramientas de build)
-# Las dependencias que llegan a la imagen final (runtime) no tienen vulnerabilidades.

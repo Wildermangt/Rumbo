@@ -1,7 +1,26 @@
+# Dependencies & Build
 node_modules/
+**/node_modules/
 dist/
+**/dist/
 coverage/
+**/coverage/
+
+# Environment & Secrets
 .env
+.env.*
+!.env.example
+!.env.docker.example
+
+# Logs & OS files
 *.log
 .DS_Store
-docs/report/node_modules/
+Thumbs.db
+
+# IDE & Editor
+.vscode/
+.idea/
+
+# Testing output
+backend/uploads-test/
+

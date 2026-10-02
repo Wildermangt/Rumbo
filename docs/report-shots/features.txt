@@ -1,8 +1,0 @@
-$ Verificacion de funcionalidades (API en vivo)
-login admin/admin123            -> token OK
-GET /tasks (total)              -> 54 tareas
-GET /tasks?search=SSL           -> 1 resultado
-GET /tasks?sort=title_asc       -> Actualizar datos de contacto en el sitio
-GET /tasks?dateFrom..&dateTo..  -> 8 en rango
-GET /tasks/stats (mes)          -> 74 % avance, 12 meses
-minimo privilegio (SELECT dir) -> denegado (correcto)

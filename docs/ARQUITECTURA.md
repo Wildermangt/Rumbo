@@ -54,6 +54,8 @@ que **el navegador nunca puede llegar a la base de datos**: todo pasa por la API
 
 ---
 
+
+
 ## 2. Orquestación y arranque (Docker Compose)
 
 Archivo: `docker-compose.yml`. Un solo comando levanta todo:
@@ -106,6 +108,8 @@ Endurece el despliegue:
   el único servicio expuesto es el frontend.
 
 ---
+
+
 
 ## 3. Base de datos (SQL Server 2022)
 
@@ -162,6 +166,9 @@ Carpeta `database/tests/`:
 
 ---
 
+
+
+
 ## 4. Backend (Node + Express + TypeScript)
 
 Arquitectura **por capas**, con responsabilidades separadas. Carpeta `backend/src/`:
@@ -214,6 +221,9 @@ Request
 
 ---
 
+
+
+
 ## 5. Frontend (Vue 3 + Vuetify + TypeScript + Vite)
 
 SPA compilada que nginx sirve estáticamente. Carpeta `frontend/src/`:
@@ -257,6 +267,9 @@ directives/     interactions.ts (v-reveal, etc.)
 
 ---
 
+
+
+
 ## 6. Flujo de datos de extremo a extremo (ejemplo)
 
 **Login + ver tareas:**
@@ -278,6 +291,8 @@ directives/     interactions.ts (v-reveal, etc.)
 
 ---
 
+
+
 ## 7. Seguridad (resumen)
 
 - **JWT** protege todos los endpoints de datos; expiración configurable.
@@ -292,6 +307,8 @@ directives/     interactions.ts (v-reveal, etc.)
 - En producción (override) solo se expone el frontend.
 
 ---
+
+
 
 ## 8. Variables de entorno (principales)
 
@@ -310,6 +327,8 @@ Todas tienen default para la demo; se sobrescriben con `.env` (ver `.env.example
 
 ---
 
+
+
 ## 9. Pruebas y CI
 
 - **Base de datos**: 36 pruebas de los SPs (`database/tests/test_procedures.sql`).
@@ -322,6 +341,8 @@ Todas tienen default para la demo; se sobrescriben con `.env` (ver `.env.example
   `docker compose` (login + listado real).
 
 ---
+
+
 
 ## 10. Cómo ejecutarlo
 
@@ -338,6 +359,8 @@ Sin Docker (desarrollo local): `npm install` + `npm run dev` en `backend/` y
 `frontend/`, apuntando a una instancia de SQL Server. Detalles en el `README.md`.
 
 ---
+
+
 
 ## 11. Decisiones de diseño (para explicar)
 
@@ -357,6 +380,8 @@ Sin Docker (desarrollo local): `npm install` + `npm run dev` en `backend/` y
 
 ---
 
+
+
 ## 12. Respuestas a las preguntas de la prueba
 
 Están desarrolladas en el `README.md`; en resumen:
@@ -375,20 +400,22 @@ Están desarrolladas en el `README.md`; en resumen:
 
 ---
 
+
+
 ## 13. Mapa rápido de archivos
 
-| Necesito ver… | Archivo |
-|---|---|
-| Esquema, SPs e índices | `database/init.sql` |
-| Pruebas / análisis de la BD | `database/tests/` |
-| Rutas y endpoints | `backend/src/routes/` |
-| Lógica de negocio | `backend/src/services/` |
-| Acceso a datos (SPs) | `backend/src/repositories/task.repository.ts` |
-| Validación de entrada | `backend/src/schemas/` |
-| Config y validación de entorno | `backend/src/config/env.ts` |
-| Pantallas | `frontend/src/views/` |
-| Lógica de UI reutilizable | `frontend/src/composables/` |
-| Cliente HTTP (token, 401) | `frontend/src/services/http.ts` |
-| Orquestación | `docker-compose.yml` · `docker-compose.prod.yml` |
-| Pipeline CI | `.github/workflows/ci.yml` |
-| Guía de ejecución y preguntas | `README.md` |
+| Necesito ver…                    | Archivo                                           |
+|----------------------------------|---------------------------------------------------|
+| Esquema, SPs e índices           | `database/init.sql`                               |
+| Pruebas / análisis de la BD      | `database/tests/`                                 |
+| Rutas y endpoints                | `backend/src/routes/`                             |
+| Lógica de negocio                | `backend/src/services/`                           |
+| Acceso a datos (SPs)             | `backend/src/repositories/task.repository.ts`     |
+| Validación de entrada            | `backend/src/schemas/`                            |
+| Config y validación de entorno   | `backend/src/config/env.ts`                       |
+| Pantallas                        | `frontend/src/views/`                             |
+| Lógica de UI reutilizable        | `frontend/src/composables/`                       |
+| Cliente HTTP (token, 401)        | `frontend/src/services/http.ts`                   |
+| Orquestación                     | `docker-compose.yml` · `docker-compose.prod.yml`  |
+| Pipeline CI                      | `.github/workflows/ci.yml`                        |
+| Guía de ejecución y preguntas    | `README.md`                                       |

@@ -201,11 +201,11 @@ Otros detalles:
 Los índices optimizan el listado principal: filtrar por estado (opcional), ordenar por fecha y paginar. Es la consulta que se ejecuta cada vez que se abre o se pagina la pantalla de tareas.
 
 ```sql
-SELECT Id, Title, Description, Status, CreatedAt, CompletedAt
-FROM dbo.Tasks
-WHERE (@Status IS NULL OR Status = @Status)
-ORDER BY CreatedAt DESC, Id DESC
-OFFSET (@PageNumber - 1) * @PageSize ROWS FETCH NEXT @PageSize ROWS ONLY;
+SELECT Id, Title, Description, Status, CreatedAt, CompletedAt                  -- Campos que se van a retornar
+FROM dbo.Tasks                                                                 -- Tabla de origen de donde se leen las tareas
+WHERE (@Status IS NULL OR Status = @Status)                                    -- Si @Status es NULL trae todas; si no, filtra por ese estado
+ORDER BY CreatedAt DESC, Id DESC                                               -- Ordena de la más reciente a la más antigua (y desempata por Id)
+OFFSET (@PageNumber - 1) * @PageSize ROWS FETCH NEXT @PageSize ROWS ONLY;      -- Omite/salta los registros de las páginas anteriores
 ```
 
 - Con un estado concreto (`PENDING` o `COMPLETED`) SQL Server usa `IX_Tasks_Status_CreatedAt (Status, CreatedAt DESC, Id DESC)`: hace un seek al estado y lee las filas ya ordenadas por fecha.
@@ -224,11 +224,11 @@ docker exec -it tasks-sqlserver bash -c '/opt/mssql-tools18/bin/sqlcmd -C -U sa 
 
 Qué debe aparecer en la salida:
 
-| Llamada | Operador esperado |
-|---------|-------------------|
-| Sin estado | `Index Scan` sobre `IX_Tasks_CreatedAt`, `ORDERED FORWARD` |
-| `@Status = 'PENDING'` | `Index Seek` sobre `IX_Tasks_Status_CreatedAt`, `SEEK: Status = 'PENDING'` |
-| `@SortDir = 'ASC'` | El mismo índice con `ORDERED BACKWARD` |
+| Llamada               | Operador esperado                                                          |
+|-----------------------|----------------------------------------------------------------------------|
+| Sin estado            | `Index Scan` sobre `IX_Tasks_CreatedAt`, `ORDERED FORWARD`                 |      -- Recorre todo el índice de fecha en orden natural
+| `@Status = 'PENDING'` | `Index Seek` sobre `IX_Tasks_Status_CreatedAt`, `SEEK: Status = 'PENDING'` |      -- Va directamente a la sección del índice donde están las tareas'PENDING' sin leer registros innecesarios
+| `@SortDir = 'ASC'`    | El mismo índice con `ORDERED BACKWARD`                                     |      -- Utiliza el índice invertido (leyéndolo de atrás hacia adelante) para evitar un operador Sort explícito en memoria
 
 En ningún caso debe aparecer un operador `Sort`.
 

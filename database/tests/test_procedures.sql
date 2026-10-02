@@ -28,12 +28,13 @@ DECLARE @task TABLE (Id INT, Title NVARCHAR(150), Description NVARCHAR(MAX), Sta
 DECLARE @att  TABLE (Id INT, TaskId INT, StoredName NVARCHAR(200), OriginalName NVARCHAR(260),
                      Size BIGINT, MimeType NVARCHAR(150), CreatedAt DATETIME2);
 DECLARE @bulk TABLE (Affected INT);
-DECLARE @del  TABLE (DeletedId INT);
+DECLARE @del  TABLE (DeletedId INT, StoredNames NVARCHAR(MAX));
+DECLARE @bulkdel TABLE (Affected INT, StoredNames NVARCHAR(MAX));
 DECLARE @stored TABLE (StoredName NVARCHAR(200));
 
 DECLARE @id1 INT, @id2 INT, @id3 INT, @recId INT, @attId INT;
 -- T-SQL no admite expresiones como argumento de EXEC: se precalculan en variables.
-DECLARE @bigtitle NVARCHAR(4000), @ids NVARCHAR(100);
+DECLARE @bigtitle NVARCHAR(4000), @ids NVARCHAR(100), @json NVARCHAR(MAX), @firstCompleted DATETIME2, @againCompleted DATETIME2;
 
 /* ---------------------------------------------------------------------------
    sp_CreateTask
@@ -153,6 +154,23 @@ BEGIN TRY
     SELECT 'sp_UpdateTaskStatus: reabrir limpia CompletedAt', CASE WHEN Status=N'PENDING' AND CompletedAt IS NULL THEN 1 ELSE 0 END, '' FROM @task;
 END TRY BEGIN CATCH
     INSERT INTO #r VALUES ('sp_UpdateTaskStatus: reabrir', 0, CONCAT('Excepción ', ERROR_NUMBER()));
+END CATCH
+
+-- Recurrencia sin duplicados: completar otra vez tras reabrir, y repetir COMPLETED,
+-- no crea más ocurrencias. Repetir COMPLETED tampoco cambia CompletedAt (idempotente).
+BEGIN TRY
+    DELETE FROM @task; INSERT INTO @task EXEC dbo.sp_UpdateTaskStatus @TaskId=@id3, @Status=N'COMPLETED';
+    SELECT @firstCompleted = CompletedAt FROM @task;
+    WAITFOR DELAY '00:00:00.050';
+    DELETE FROM @task; INSERT INTO @task EXEC dbo.sp_UpdateTaskStatus @TaskId=@id3, @Status=N'COMPLETED';
+    SELECT @againCompleted = CompletedAt FROM @task;
+    SELECT @cnt = COUNT(*) FROM dbo.Tasks WHERE SourceTaskId=@id3;
+    INSERT INTO #r VALUES ('sp_UpdateTaskStatus: recurrencia no duplica ocurrencias', CASE WHEN @cnt=1 THEN 1 ELSE 0 END, CONCAT('ocurrencias=',@cnt));
+    INSERT INTO #r VALUES ('sp_UpdateTaskStatus: COMPLETED repetido es idempotente', CASE WHEN @againCompleted=@firstCompleted THEN 1 ELSE 0 END,
+        CONCAT('antes=',CONVERT(VARCHAR(30),@firstCompleted,121),' despues=',CONVERT(VARCHAR(30),@againCompleted,121)));
+    DELETE FROM @task; INSERT INTO @task EXEC dbo.sp_UpdateTaskStatus @TaskId=@id3, @Status=N'PENDING';
+END TRY BEGIN CATCH
+    INSERT INTO #r VALUES ('sp_UpdateTaskStatus: recurrencia sin duplicados', 0, CONCAT('Excepción ', ERROR_NUMBER(), ' ', ERROR_MESSAGE()));
 END CATCH
 
 -- FAIL: estado inválido -> 50400
@@ -285,6 +303,32 @@ END TRY BEGIN CATCH
     INSERT INTO #r VALUES ('sp_BulkUpdateStatus: afecta 2 filas', 0, CONCAT('Excepción ', ERROR_NUMBER()));
 END CATCH
 
+-- Repetir el mismo estado no cuenta filas (solo cuenta las que cambian)
+DELETE FROM @bulk;
+BEGIN TRY
+    INSERT INTO @bulk EXEC dbo.sp_BulkUpdateStatus @Ids = @ids, @Status=N'COMPLETED';
+    SELECT @affected = Affected FROM @bulk;
+    INSERT INTO #r VALUES ('sp_BulkUpdateStatus: estado repetido afecta 0', CASE WHEN @affected=0 THEN 1 ELSE 0 END, CONCAT('Affected=',@affected));
+END TRY BEGIN CATCH
+    INSERT INTO #r VALUES ('sp_BulkUpdateStatus: estado repetido', 0, CONCAT('Excepción ', ERROR_NUMBER()));
+END CATCH
+
+-- Recurrencia en lote: completar una diaria crea su próxima ocurrencia (+1d)
+DELETE FROM @task;
+INSERT INTO @task EXEC dbo.sp_CreateTask @Title=N'ZZTEST rec lote', @DueDate='2030-05-01', @Recurrence=N'DAILY';
+SELECT @id2 = Id FROM @task;
+DELETE FROM @bulk;
+SET @ids = CONCAT('[', @id2, ']');
+BEGIN TRY
+    INSERT INTO @bulk EXEC dbo.sp_BulkUpdateStatus @Ids = @ids, @Status=N'COMPLETED';
+    SELECT @cnt = COUNT(*) FROM dbo.Tasks WHERE SourceTaskId=@id2 AND DueDate='2030-05-02' AND Status=N'PENDING';
+    INSERT INTO #r VALUES ('sp_BulkUpdateStatus: recurrencia crea próxima ocurrencia (+1d)', CASE WHEN @cnt=1 THEN 1 ELSE 0 END, CONCAT('ocurrencias=',@cnt));
+END TRY BEGIN CATCH
+    INSERT INTO #r VALUES ('sp_BulkUpdateStatus: recurrencia', 0, CONCAT('Excepción ', ERROR_NUMBER()));
+END CATCH
+-- Restaura @id2 a la tarea con adjunto para la prueba de cascada.
+SELECT @id2 = TaskId FROM @att;
+
 -- FAIL: ids vacíos -> 50400
 BEGIN TRY
     EXEC dbo.sp_BulkUpdateStatus @Ids=N'[]', @Status=N'PENDING';
@@ -319,11 +363,16 @@ END TRY BEGIN CATCH
     INSERT INTO #r VALUES ('sp_DeleteTask: inexistente -> 50404', CASE WHEN ERROR_NUMBER()=50404 THEN 1 ELSE 0 END, CONCAT('err=',ERROR_NUMBER()));
 END CATCH
 
--- Cascada: borrar @id2 debe borrar su adjunto 'cas.bin'
+-- Cascada: borrar @id2 debe borrar su adjunto 'cas.bin' y devolver su nombre en disco
 BEGIN TRY
+    DELETE FROM @del;
     INSERT INTO @del EXEC dbo.sp_DeleteTask @TaskId=@id2;
     SELECT @cnt = COUNT(*) FROM dbo.TaskAttachments WHERE Id=@attId;
     INSERT INTO #r VALUES ('FK cascada: borrar tarea elimina sus adjuntos', CASE WHEN @cnt=0 THEN 1 ELSE 0 END, CONCAT('adjuntos restantes=',@cnt));
+    SELECT @json = StoredNames FROM @del;
+    INSERT INTO #r VALUES ('sp_DeleteTask: devuelve archivos a borrar del disco',
+        CASE WHEN EXISTS (SELECT 1 FROM OPENJSON(@json) WITH (StoredName NVARCHAR(200)) WHERE StoredName=N'cas.bin') THEN 1 ELSE 0 END,
+        CONCAT('StoredNames=', ISNULL(@json,'NULL')));
 END TRY BEGIN CATCH
     INSERT INTO #r VALUES ('FK cascada', 0, CONCAT('Excepción ', ERROR_NUMBER()));
 END CATCH
@@ -331,11 +380,16 @@ END CATCH
 -- sp_BulkDeleteTasks: crea 2, los borra en lote
 DELETE FROM @task; INSERT INTO @task EXEC dbo.sp_CreateTask @Title=N'ZZTEST lote A'; SELECT @id1 = Id FROM @task;
 DELETE FROM @task; INSERT INTO @task EXEC dbo.sp_CreateTask @Title=N'ZZTEST lote B'; SELECT @id2 = Id FROM @task;
-DELETE FROM @bulk;
+DELETE FROM @att;
+INSERT INTO @att EXEC dbo.sp_AddAttachment @TaskId=@id1, @StoredName=N'lote.bin', @OriginalName=N'lote.pdf', @Size=10;
+DELETE FROM @bulkdel;
 SET @ids = CONCAT('[', @id1, ',', @id2, ']');
 BEGIN TRY
-    INSERT INTO @bulk EXEC dbo.sp_BulkDeleteTasks @Ids = @ids;
-    SELECT @affected = Affected FROM @bulk;
+    INSERT INTO @bulkdel EXEC dbo.sp_BulkDeleteTasks @Ids = @ids;
+    SELECT @affected = Affected, @json = StoredNames FROM @bulkdel;
+    INSERT INTO #r VALUES ('sp_BulkDeleteTasks: devuelve archivos a borrar del disco',
+        CASE WHEN EXISTS (SELECT 1 FROM OPENJSON(@json) WITH (StoredName NVARCHAR(200)) WHERE StoredName=N'lote.bin') THEN 1 ELSE 0 END,
+        CONCAT('StoredNames=', ISNULL(@json,'NULL')));
     SELECT @cnt = COUNT(*) FROM dbo.Tasks WHERE Id IN (@id1,@id2);
     INSERT INTO #r VALUES ('sp_BulkDeleteTasks: borra 2 en lote', CASE WHEN @affected=2 AND @cnt=0 THEN 1 ELSE 0 END, CONCAT('Affected=',@affected));
 END TRY BEGIN CATCH
