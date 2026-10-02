@@ -12,10 +12,6 @@ import AppSnackbar from '@/components/AppSnackbar.vue';
 </template>
 
 <style>
-/*
- * No se usa <transition mode="out-in"> en el router-view: esa transición dejaba
- * la vista en blanco al navegar en el cliente (la salida no terminaba y la nueva
- * vista nunca entraba, obligando a refrescar). La entrada en cascada de cada
- * sección la aporta la directiva v-reveal, así que la navegación es inmediata.
- */
+/* Sin <transition mode="out-in"> en el router-view (dejaba la vista en blanco al
+   navegar); la entrada de cada sección la aporta la directiva v-reveal. */
 </style>

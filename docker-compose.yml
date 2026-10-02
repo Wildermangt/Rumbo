@@ -1,5 +1,5 @@
 # -----------------------------------------------------------------------------
-# Task Manager - Orquestación completa
+# Rumbo - Orquestación completa
 #   docker compose up --build
 #
 # Orden de arranque garantizado por healthchecks:

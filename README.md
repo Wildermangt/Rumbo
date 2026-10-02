@@ -29,8 +29,8 @@ Necesitas Docker con el plugin de Docker Compose v2. Sirve en Linux, macOS o Win
 2. Clona el repositorio y entra en la carpeta:
 
    ```bash
-   git clone <URL-del-repositorio> task-manager
-   cd task-manager
+   git clone <URL-del-repositorio> rumbo
+   cd rumbo
    ```
 
 3. Levanta todo el entorno:
@@ -289,7 +289,7 @@ En este modo la API no arranca si los secretos siguen con el valor por defecto, 
 
 ## Seguridad
 
-El proyecto tiene una revisión de seguridad en `docs/Informe-Seguridad-Task-Manager.pdf`. Lo ya aplicado:
+El proyecto tiene una revisión de seguridad en `docs/Informe-Seguridad-Rumbo.pdf`. Lo ya aplicado:
 
 - En modo producción la API no arranca si el secreto de JWT, la contraseña de la base o la contraseña del usuario de la aplicación siguen con el valor de demo. Los secretos reales van en `.env`, que no se sube al repositorio.
 - El frontend corre en un contenedor sin usuario root.

@@ -304,7 +304,6 @@ onMounted(loadSummary);
               </button>
             </label>
 
-            <!-- Filtro por estado -->
             <div class="seg">
               <button
                 v-for="f in filters"
@@ -318,7 +317,6 @@ onMounted(loadSummary);
               </button>
             </div>
 
-            <!-- Filtro por prioridad -->
             <v-select
               v-model="filterPriority"
               :items="priorityFilters"
@@ -332,7 +330,6 @@ onMounted(loadSummary);
               data-testid="priority-filter"
             />
 
-            <!-- Filtro por categoría -->
             <v-select
               v-model="filterCategory"
               :items="categoryFilters"
@@ -350,7 +347,6 @@ onMounted(loadSummary);
               <template #selection="{ item }">{{ item.raw || 'Categoría' }}</template>
             </v-select>
 
-            <!-- Filtro de orden -->
             <v-select
               v-model="sort"
               :items="sortOptions"
